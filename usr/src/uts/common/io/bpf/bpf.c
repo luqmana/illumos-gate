@@ -1548,7 +1548,7 @@ bpf_deliver(struct bpf_d *d, cp_fn_t cpfn, void *marg, uint_t pktlen,
  */
 /* ARGSUSED */
 void
-bpf_mtap(void *arg, mac_resource_handle_t mrh, mblk_t *m, boolean_t issent)
+bpf_mtap(void *arg, boolean_t incoming, mblk_t *m, boolean_t loopback)
 {
 	cp_fn_t cpfn;
 	struct bpf_d *d = arg;
@@ -1567,7 +1567,7 @@ bpf_mtap(void *arg, mac_resource_handle_t mrh, mblk_t *m, boolean_t issent)
 		buflen = 0;
 	}
 
-	bpf_deliver(d, cpfn, marg, pktlen, buflen, issent);
+	bpf_deliver(d, cpfn, marg, pktlen, buflen, !incoming);
 }
 
 /*

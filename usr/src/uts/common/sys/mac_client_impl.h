@@ -25,6 +25,7 @@
  */
 /*
  * Copyright 2018 Joyent, Inc.
+ * Copyright 2023 Oxide Computer Company
  */
 
 #ifndef	_SYS_MAC_CLIENT_IMPL_H
@@ -76,7 +77,7 @@ typedef struct mac_promisc_impl_s {			/* Protected by */
 	mac_cb_t			mpi_mci_link;	/* mi_promisc_lock */
 	mac_cb_t			mpi_mi_link;	/* mi_promisc_lock */
 	mac_client_promisc_type_t	mpi_type;	/* WO */
-	mac_rx_t			mpi_fn;		/* WO */
+	mac_promisc_rx_t		mpi_fn;		/* WO */
 	void				*mpi_arg;	/* WO */
 	struct mac_client_impl_s	*mpi_mcip;	/* WO */
 	boolean_t			mpi_no_tx_loop;	/* WO */

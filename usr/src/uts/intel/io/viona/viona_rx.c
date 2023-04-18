@@ -35,9 +35,9 @@
  *
  * Copyright 2015 Pluribus Networks Inc.
  * Copyright 2019 Joyent, Inc.
- * Copyright 2022 Oxide Computer Company
  * Copyright 2022 Michael Zeller
  * Copyright 2022 OmniOS Community Edition (OmniOSce) Association.
+ * Copyright 2023 Oxide Computer Company
  */
 
 #include <sys/types.h>
@@ -647,8 +647,17 @@ viona_rx_classified(void *arg, mac_resource_handle_t mrh, mblk_t *mp,
 	viona_rx_common(ring, mp, is_loopback);
 }
 
+/*ARGSUSED*/
+static inline void
+viona_promisc_rx_classified(void *arg, boolean_t incoming, mblk_t *mp,
+    boolean_t is_loopback)
+{
+	viona_rx_classified(arg, NULL, mp, is_loopback);
+}
+
+/*ARGSUSED*/
 static void
-viona_rx_mcast(void *arg, mac_resource_handle_t mrh, mblk_t *mp,
+viona_rx_mcast(void *arg, boolean_t incoming, mblk_t *mp,
     boolean_t is_loopback)
 {
 	viona_vring_t *ring = (viona_vring_t *)arg;
@@ -741,7 +750,7 @@ viona_rx_set(viona_link_t *link, viona_promisc_t mode)
 	case VIONA_PROMISC_ALL:
 		mac_rx_clear(link->l_mch);
 		err = mac_promisc_add(link->l_mch, MAC_CLIENT_PROMISC_ALL,
-		    viona_rx_classified, ring, &link->l_mph,
+		    viona_promisc_rx_classified, ring, &link->l_mph,
 		    MAC_PROMISC_FLAGS_NO_TX_LOOP |
 		    MAC_PROMISC_FLAGS_VLAN_TAG_STRIP);
 		/*

@@ -21,6 +21,7 @@
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright 2023 Oxide Computer Company
  */
 
 #ifndef	_SYS_DLS_IMPL_H
@@ -118,9 +119,9 @@ extern boolean_t	dls_accept_promisc(dld_str_t *, mac_header_info_t *,
 			    dls_rx_t *, void **, boolean_t);
 extern void		i_dls_link_rx(void *, mac_resource_handle_t, mblk_t *,
 			    boolean_t);
-extern void		dls_rx_promisc(void *, mac_resource_handle_t, mblk_t *,
+extern void		dls_rx_promisc(void *, boolean_t, mblk_t *,
 			    boolean_t);
-extern void		dls_rx_vlan_promisc(void *, mac_resource_handle_t,
+extern void		dls_rx_vlan_promisc(void *, boolean_t,
 			    mblk_t *, boolean_t);
 extern int		dls_active_set(dld_str_t *);
 extern void		dls_active_clear(dld_str_t *, boolean_t);

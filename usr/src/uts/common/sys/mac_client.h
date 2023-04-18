@@ -23,6 +23,7 @@
  * Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  * Copyright 2019 Joyent, Inc.
+ * Copyright 2023 Oxide Computer Company
  */
 
 /*
@@ -145,8 +146,9 @@ extern mac_tx_cookie_t mac_tx(mac_client_handle_t, mblk_t *,
 extern boolean_t mac_tx_is_flow_blocked(mac_client_handle_t, mac_tx_cookie_t);
 extern uint64_t mac_client_stat_get(mac_client_handle_t, uint_t);
 
+typedef void (*mac_promisc_rx_t)(void *, boolean_t, mblk_t *, boolean_t);
 extern int mac_promisc_add(mac_client_handle_t, mac_client_promisc_type_t,
-    mac_rx_t, void *, mac_promisc_handle_t *, uint16_t);
+    mac_promisc_rx_t, void *, mac_promisc_handle_t *, uint16_t);
 extern void mac_promisc_remove(mac_promisc_handle_t);
 
 extern mac_notify_handle_t mac_notify_add(mac_handle_t, mac_notify_t, void *);

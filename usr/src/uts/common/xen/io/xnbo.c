@@ -22,6 +22,7 @@
 /*
  * Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright 2023 Oxide Computer Company
  */
 
 /*
@@ -260,13 +261,30 @@ xnbo_from_mac_filter(void *arg, mac_resource_handle_t mrh, mblk_t *mp,
 		freemsgchain(free_head);
 }
 
+static inline void
+xnbo_from_mac_promisc(void *arg, boolean_t incoming, mblk_t *mp,
+    boolean_t loopback)
+{
+	_NOTE(ARGUNUSED(incoming));
+	xnbo_from_mac(arg, NULL, mp, loopback);
+}
+
+static inline void
+xnbo_from_mac_filter_promisc(void *arg, boolean_t incoming, mblk_t *mp,
+    boolean_t loopback)
+{
+	_NOTE(ARGUNUSED(incoming));
+	xnbo_from_mac_filter(arg, NULL, mp, loopback);
+}
+
 static boolean_t
 xnbo_open_mac(xnb_t *xnbp, char *mac)
 {
 	xnbo_t *xnbop = xnbp->xnb_flavour_data;
 	int err;
 	const mac_info_t *mi;
-	void (*rx_fn)(void *, mac_resource_handle_t, mblk_t *, boolean_t);
+	mac_rx_t rx_fn;
+	mac_promisc_rx_t promisc_rx_fn;
 	struct ether_addr ea;
 	uint_t max_sdu;
 	mac_diag_t diag;
@@ -321,10 +339,13 @@ xnbo_open_mac(xnb_t *xnbp, char *mac)
 		return (B_FALSE);
 	}
 
-	if (xnbop->o_need_rx_filter)
+	if (xnbop->o_need_rx_filter) {
 		rx_fn = xnbo_from_mac_filter;
-	else
+		promisc_rx_fn = xnbo_from_mac_filter_promisc;
+	} else {
 		rx_fn = xnbo_from_mac;
+		promisc_rx_fn = xnbo_from_mac_promisc;
+	}
 
 	err = mac_unicast_add_set_rx(xnbop->o_mch, NULL, MAC_UNICAST_PRIMARY,
 	    &xnbop->o_mah, 0, &diag, xnbop->o_multicast_control ? rx_fn : NULL,
@@ -337,7 +358,8 @@ xnbo_open_mac(xnb_t *xnbp, char *mac)
 	}
 	if (!xnbop->o_multicast_control) {
 		err = mac_promisc_add(xnbop->o_mch, MAC_CLIENT_PROMISC_ALL,
-		    rx_fn, xnbp, &xnbop->o_mphp, MAC_PROMISC_FLAGS_NO_TX_LOOP |
+		    promisc_rx_fn, xnbp, &xnbop->o_mphp,
+		    MAC_PROMISC_FLAGS_NO_TX_LOOP |
 		    MAC_PROMISC_FLAGS_VLAN_TAG_STRIP);
 		if (err != 0) {
 			cmn_err(CE_WARN, "xnbo_open_mac: "

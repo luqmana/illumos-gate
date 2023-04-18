@@ -24,6 +24,7 @@
  * Copyright 2019 Joyent, Inc.
  * Copyright 2017 RackTop Systems.
  * Copyright 2022 OmniOS Community Edition (OmniOSce) Association.
+ * Copyright 2023 Oxide Computer Company
  */
 
 /*
@@ -3341,7 +3342,8 @@ mac_multicast_remove(mac_client_handle_t mch, const uint8_t *addr)
  */
 int
 mac_promisc_add(mac_client_handle_t mch, mac_client_promisc_type_t type,
-    mac_rx_t fn, void *arg, mac_promisc_handle_t *mphp, uint16_t flags)
+    mac_promisc_rx_t fn, void *arg, mac_promisc_handle_t *mphp,
+    uint16_t flags)
 {
 	mac_client_impl_t *mcip = (mac_client_impl_t *)mch;
 	mac_impl_t *mip = mcip->mci_mip;
@@ -4101,9 +4103,11 @@ mac_client_get_effective_resources(mac_client_handle_t mch,
  */
 static void
 mac_promisc_dispatch_one(mac_promisc_impl_t *mpip, mblk_t *mp,
-    boolean_t loopback, boolean_t local)
+    mac_client_impl_t *sender, boolean_t local)
 {
 	mblk_t *mp_next;
+	boolean_t loopback = (sender == mpip->mpi_mcip);
+	boolean_t incoming = (sender == NULL);
 
 	if (!mpip->mpi_no_copy || mpip->mpi_strip_vlan_tag) {
 		mblk_t *mp_copy;
@@ -4125,7 +4129,7 @@ mac_promisc_dispatch_one(mac_promisc_impl_t *mpip, mblk_t *mp,
 		for (mblk_t *tmp = mp_copy; tmp != NULL; tmp = mp_next) {
 			mp_next = tmp->b_next;
 			tmp->b_next = NULL;
-			mpip->mpi_fn(mpip->mpi_arg, NULL, tmp, loopback);
+			mpip->mpi_fn(mpip->mpi_arg, incoming, tmp, loopback);
 		}
 
 		return;
@@ -4133,7 +4137,7 @@ mac_promisc_dispatch_one(mac_promisc_impl_t *mpip, mblk_t *mp,
 
 	mp_next = mp->b_next;
 	mp->b_next = NULL;
-	mpip->mpi_fn(mpip->mpi_arg, NULL, mp, loopback);
+	mpip->mpi_fn(mpip->mpi_arg, incoming, mp, loopback);
 	mp->b_next = mp_next;
 }
 
@@ -4217,7 +4221,7 @@ mac_promisc_dispatch(mac_impl_t *mip, mblk_t *mp_chain,
 			if (is_sender ||
 			    mpip->mpi_type == MAC_CLIENT_PROMISC_ALL ||
 			    is_mcast) {
-				mac_promisc_dispatch_one(mpip, mp, is_sender,
+				mac_promisc_dispatch_one(mpip, mp, sender,
 				    local);
 			}
 		}
@@ -4248,7 +4252,7 @@ mac_promisc_client_dispatch(mac_client_impl_t *mcip, mblk_t *mp_chain)
 			mpip = (mac_promisc_impl_t *)mcb->mcb_objp;
 			if (mpip->mpi_type == MAC_CLIENT_PROMISC_FILTERED &&
 			    !is_mcast) {
-				mac_promisc_dispatch_one(mpip, mp, B_FALSE,
+				mac_promisc_dispatch_one(mpip, mp, NULL,
 				    B_FALSE);
 			}
 		}

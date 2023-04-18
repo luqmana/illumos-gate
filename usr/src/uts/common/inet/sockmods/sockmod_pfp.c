@@ -22,6 +22,7 @@
 /*
  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2015 Joyent, Inc. All rights reserved.
+ * Copyright 2023 Oxide Computer Company
  */
 
 #include <sys/types.h>
@@ -63,7 +64,7 @@ static int pfp_lifreq_getlinkid(intptr_t, struct lifreq *, datalink_id_t *,
     int);
 static int pfp_open_index(int, mac_handle_t *, mac_client_handle_t *,
     cred_t *);
-static void pfp_packet(void *, mac_resource_handle_t, mblk_t *, boolean_t);
+static void pfp_packet(void *, boolean_t, mblk_t *, boolean_t);
 static void pfp_release_bpf(struct pfpsock *);
 static int pfp_set_promisc(struct pfpsock *, mac_client_promisc_type_t);
 static int pfp_setsocket_sockopt(sock_lower_handle_t, int, const void *,
@@ -351,7 +352,7 @@ sockpfp_create(int family, int type, int proto,
  */
 /* ARGSUSED */
 static void
-pfp_packet(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t flag)
+pfp_packet(void *arg, boolean_t incoming, mblk_t *mp, boolean_t flag)
 {
 	struct T_unitdata_ind *tunit;
 	struct sockaddr_ll *sll;

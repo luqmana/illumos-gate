@@ -22,6 +22,7 @@
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  * Copyright 2019 Joyent, Inc.
+ * Copyright 2023 Oxide Computer Company
  */
 
 /*
@@ -511,7 +512,7 @@ loop:
 
 /* ARGSUSED */
 void
-dls_rx_vlan_promisc(void *arg, mac_resource_handle_t mrh, mblk_t *mp,
+dls_rx_vlan_promisc(void *arg, boolean_t incoming, mblk_t *mp,
     boolean_t loopback)
 {
 	dld_str_t			*dsp = arg;
@@ -554,8 +555,7 @@ drop:
 
 /* ARGSUSED */
 void
-dls_rx_promisc(void *arg, mac_resource_handle_t mrh, mblk_t *mp,
-    boolean_t loopback)
+dls_rx_promisc(void *arg, boolean_t incoming, mblk_t *mp, boolean_t loopback)
 {
 	dld_str_t			*dsp = arg;
 	dls_link_t			*dlp = dsp->ds_dlp;

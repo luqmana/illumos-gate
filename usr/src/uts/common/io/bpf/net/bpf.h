@@ -297,7 +297,7 @@ extern void	bpfattach(uintptr_t, int, zoneid_t, int);
 extern void	bpfdetach(uintptr_t);
 extern uint_t	bpf_filter(struct bpf_insn *, uchar_t *, uint_t, uint_t);
 extern void	bpf_itap(void *, mblk_t *, boolean_t, uint_t);
-extern void	bpf_mtap(void *, mac_resource_handle_t, mblk_t *, boolean_t);
+extern void	bpf_mtap(void *, boolean_t, mblk_t *, boolean_t);
 extern int	bpf_validate(struct bpf_insn *, int);
 
 #endif /* _KERNEL */

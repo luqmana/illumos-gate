@@ -21,6 +21,7 @@
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright 2023 Oxide Computer Company
  */
 
 #include <sys/stat.h>
@@ -172,6 +173,13 @@ fcoe_close_mac(fcoe_mac_t *mac)
 	return (FCOE_SUCCESS);
 }
 
+/* ARGSUSED */
+static inline void
+fcoe_promisc_rx(void *arg, boolean_t incoming, mblk_t *mp, boolean_t loopback)
+{
+	fcoe_rx(arg, NULL, mp, loopback);
+}
+
 int
 fcoe_enable_callback(fcoe_mac_t *mac)
 {
@@ -182,7 +190,7 @@ fcoe_enable_callback(fcoe_mac_t *mac)
 	 */
 	if (mac->fm_force_promisc) {
 		ret = mac_promisc_add(mac->fm_cli_handle,
-		    MAC_CLIENT_PROMISC_FILTERED, fcoe_rx, mac,
+		    MAC_CLIENT_PROMISC_FILTERED, fcoe_promisc_rx, mac,
 		    &mac->fm_promisc_handle,
 		    MAC_PROMISC_FLAGS_NO_TX_LOOP);
 		if (ret != 0) {
