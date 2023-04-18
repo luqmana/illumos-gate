@@ -40,6 +40,7 @@
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright 2023 Oxide Computer Company
  */
 
 #ifndef _NET_BPFDESC_H_
@@ -60,7 +61,7 @@ typedef struct bpf_provider_s {
 	int		bpr_unit;
 	int		(*bpr_open)(const char *, uintptr_t *, zoneid_t);
 	void		(*bpr_close)(uintptr_t);
-	const char 	*(*bpr_name)(uintptr_t);
+	const char	*(*bpr_name)(uintptr_t);
 	int		(*bpr_type)(uintptr_t);
 	void		(*bpr_sdu_get)(uintptr_t, uint_t *);
 	int		(*bpr_tx)(uintptr_t, mblk_t *);
@@ -70,7 +71,7 @@ typedef struct bpf_provider_s {
 	int		(*bpr_getlinkid)(const char *, datalink_id_t *,
 			    zoneid_t);
 	void		(*bpr_client_close)(uintptr_t);
-	const char 	*(*bpr_client_name)(uintptr_t);
+	const char	*(*bpr_client_name)(uintptr_t);
 	int		(*bpr_client_open)(uintptr_t, uintptr_t *);
 	int		(*bpr_getzone)(uintptr_t, zoneid_t *);
 	int		(*bpr_getdlt)(uintptr_t, uint_t *);
@@ -126,14 +127,14 @@ struct bpf_d {
 	void *		bd_sbuf;	/* store slot */
 	void *		bd_hbuf;	/* hold slot */
 	void *		bd_fbuf;	/* free slot */
-	int 		bd_slen;	/* current length of store buffer */
-	int 		bd_hlen;	/* current length of hold buffer */
+	int		bd_slen;	/* current length of store buffer */
+	int		bd_hlen;	/* current length of hold buffer */
 
 	int		bd_bufsize;	/* absolute length of buffers */
 
-	uintptr_t 	bd_bif;		/* interface pointer */
+	uintptr_t	bd_bif;		/* interface pointer */
 	ulong_t		bd_rtout;	/* Read timeout in 'ticks' */
-	struct bpf_insn *bd_filter; 	/* filter code */
+	struct bpf_insn	*bd_filter;	/* filter code */
 	size_t		bd_filter_size;
 	ulong_t		bd_rcount;	/* number of packets received */
 	ulong_t		bd_dcount;	/* number of packets dropped */
@@ -143,7 +144,7 @@ struct bpf_d {
 	uchar_t		bd_state;	/* idle, waiting, or timed out */
 	uchar_t		bd_immediate;	/* true to return on packet arrival */
 	int		bd_hdrcmplt;	/* false to fill in src lladdr */
-	int		bd_seesent;	/* true if bpf should see sent pkts */
+	int		bd_direction;	/* pkts (in/out/inout) bpf should see */
 	int		bd_async;	/* non-zero if packet reception .. */
 					/* .. should generate signal */
 	int		bd_nonblock;	/* non-zero for non-blocking read */

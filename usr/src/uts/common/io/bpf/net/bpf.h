@@ -39,6 +39,7 @@
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright 2023 Oxide Computer Company
  */
 
 #ifndef _NET_BPF_H_
@@ -147,12 +148,23 @@ struct bpf_version {
 #define	BIOCSSEESENT	 _IOW('B', 121, uint_t)
 #define	BIOCSRTIMEOUT	 _IOW('B', 122, struct timeval)
 #define	BIOCGRTIMEOUT	 _IOR('B', 123, struct timeval)
+#define	BIOCGDIRECTION	 _IOR('B', 124, uint_t)
+#define	BIOCSDIRECTION	 _IOW('B', 125, uint_t)
 /*
  */
 #define	BIOCSETF32	 _IOW('B', 103, struct bpf_program32)
 #define	BIOCGDLTLIST32	_IOWR('B', 119, struct bpf_dltlist32)
 #define	BIOCSRTIMEOUT32	 _IOW('B', 122, struct timeval32)
 #define	BIOCGRTIMEOUT32	 _IOR('B', 123, struct timeval32)
+
+/*
+ * Packet directions
+ */
+enum bpf_direction {
+	BPF_D_IN,		/* see incoming pkts */
+	BPF_D_INOUT,	/* see incoming and outgoing pkts */
+	BPF_D_OUT		/* see outgoing pkts */
+};
 
 /*
  * Structure prepended to each packet. This is "wire" format, so we
@@ -211,7 +223,7 @@ struct bpf_hdr {
 #define		BPF_H		0x08
 #define		BPF_B		0x10
 #define	BPF_MODE(code)	((code) & 0xe0)
-#define		BPF_IMM 	0x00
+#define		BPF_IMM		0x00
 #define		BPF_ABS		0x20
 #define		BPF_IND		0x40
 #define		BPF_MEM		0x60

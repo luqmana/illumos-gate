@@ -41,6 +41,7 @@
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  * Copyright 2017 Joyent, Inc.
+ * Copyright 2023 Oxide Computer Company
  */
 
 /*
@@ -489,7 +490,7 @@ bpfopen(dev_t *devp, int flag, int mode, cred_t *cred)
 	d->bd_bufsize = bpf_bufsize;
 	d->bd_fmode = flag;
 	d->bd_zone = crgetzoneid(cred);
-	d->bd_seesent = 1;
+	d->bd_direction = BPF_D_INOUT;
 	d->bd_promisc_flags = MAC_PROMISC_FLAGS_NO_PHYS|
 	    MAC_PROMISC_FLAGS_NO_COPY;
 	mutex_init(&d->bd_lock, NULL, MUTEX_DRIVER, NULL);
@@ -1225,17 +1226,43 @@ bpfioctl(dev_t dev, int cmd, intptr_t addr, int mode, cred_t *cred, int *rval)
 	 * Get "see sent packets" flag
 	 */
 	case BIOCGSEESENT:
-		if (copyout(&d->bd_seesent, (void *)addr,
-		    sizeof (d->bd_seesent)) != 0)
-			error = EFAULT;
+		{
+			int seesent = (d->bd_direction != BPF_D_IN);
+			if (copyout(&seesent, (void *)addr,
+			    sizeof (seesent)) != 0)
+				error = EFAULT;
+		}
 		break;
 
 	/*
 	 * Set "see sent" packets flag
 	 */
 	case BIOCSSEESENT:
-		if (copyin((void *)addr, &d->bd_seesent,
-		    sizeof (d->bd_seesent)) != 0)
+		{
+			int seesent = 0;
+			if (copyin((void *)addr, &seesent,
+			    sizeof (seesent)) != 0)
+				error = EFAULT;
+			d->bd_direction =
+			    (seesent == 1 ? BPF_D_INOUT : BPF_D_IN);
+		}
+		break;
+
+	/*
+	 * Get "packet direction" flag
+	 */
+	case BIOCGDIRECTION:
+		if (copyout(&d->bd_direction, (void *)addr,
+		    sizeof (d->bd_direction)) != 0)
+			error = EFAULT;
+		break;
+
+	/*
+	 * Set "packet direction" flag
+	 */
+	case BIOCSDIRECTION:
+		if (copyin((void *)addr, &d->bd_direction,
+		    sizeof (d->bd_direction)) != 0)
 			error = EFAULT;
 		break;
 
@@ -1495,7 +1522,8 @@ bpf_deliver(struct bpf_d *d, cp_fn_t cpfn, void *marg, uint_t pktlen,
 	struct timeval tv;
 	uint_t slen;
 
-	if (!d->bd_seesent && issent)
+	if ((d->bd_direction == BPF_D_IN && issent) ||
+	    (d->bd_direction == BPF_D_OUT && !issent))
 		return;
 
 	/*
