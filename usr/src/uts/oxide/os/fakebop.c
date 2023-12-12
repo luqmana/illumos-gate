@@ -622,7 +622,7 @@ apob_init(void)
  * day this might look more like the sun4 code than i86pc.
  */
 void
-_start(uint64_t ramdisk_paddr, size_t ramdisk_len)
+_start(uint64_t ramdisk_paddr, size_t ramdisk_len, uint64_t fake_spstartup)
 {
 	extern void _kobj_boot();
 	extern int use_mp;
@@ -632,13 +632,17 @@ _start(uint64_t ramdisk_paddr, size_t ramdisk_len)
 	bsp = boot_console_init();
 
 	/*
-	 * XXX - how could we detect a non-oxide platform here and set
-	 *	ipcc_enable = B_FALSE?
+	 * If fake_spstartup is non-zero we'll assume that we're running on a
+	 * non-oxide platform and disable the use of IPCC.
 	 */
+	if (fake_spstartup != 0)
+	{
+		ipcc_enable = B_FALSE;
+	}
 
 	kernel_ipcc_init(IPCC_INIT_EARLYBOOT);
 	eb_physmem_init(&bm);
-	eb_create_properties(ramdisk_paddr, ramdisk_len);
+	eb_create_properties(ramdisk_paddr, ramdisk_len, fake_spstartup);
 
 	EB_DBGMSG("\n\n*** Entered illumos in _start()\n");
 

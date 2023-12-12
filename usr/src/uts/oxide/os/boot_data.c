@@ -238,9 +238,32 @@ bt_set_prop_str(const char *name, const char *value)
 }
 
 static void
-eb_create_common_properties(uint64_t ramdisk_paddr, size_t ramdisk_len)
+eb_create_common_properties(uint64_t ramdisk_paddr, size_t ramdisk_len,
+    uint64_t spstartup)
 {
 	uint64_t ramdisk_start, ramdisk_end;
+
+	/*
+	 * krtld will ignore RB_DEBUGENTER when not accompanied by RB_KMDB.
+	 * Setting IPCC_STARTUP_KMDB_BOOT will set both, regardless of the
+	 * status of IPCC_STARTUP_KMDB.
+	 */
+	if ((spstartup & IPCC_STARTUP_KMDB_BOOT) != 0)
+		boothowto |= RB_KMDB | RB_DEBUGENTER;
+	else if ((spstartup & IPCC_STARTUP_KMDB) != 0)
+		boothowto |= RB_KMDB;
+
+	if ((spstartup & IPCC_STARTUP_VERBOSE) != 0)
+		boothowto |= RB_VERBOSE;
+
+	if ((spstartup & IPCC_STARTUP_KBM) != 0)
+		kbm_debug = B_TRUE;
+
+	if ((spstartup & IPCC_STARTUP_BOOTRD) != 0)
+		bootrd_debug = 1;
+
+	if ((spstartup & IPCC_STARTUP_PROM) != 0)
+		prom_debug = 1;
 
 	/*
 	 * The APOB address and reset vector are stored in, or computed
@@ -293,9 +316,6 @@ eb_create_common_properties(uint64_t ramdisk_paddr, size_t ramdisk_len)
 static void
 eb_fake_ipcc_properties(void)
 {
-	boothowto |= RB_KMDB | RB_VERBOSE;
-	prom_debug = 1;
-
 	bt_set_prop_str(BTPROP_NAME_BOOT_SOURCE, "ramdisk");
 	bt_set_prop_u8(BTPROP_NAME_BSU, 'A');
 
@@ -309,39 +329,11 @@ eb_fake_ipcc_properties(void)
 }
 
 static void
-eb_real_ipcc_properties(void)
+eb_real_ipcc_properties(uint64_t spstatus, uint64_t spstartup)
 {
-	uint64_t spstatus, spstartup;
 	ipcc_ident_t ident;
 	uint8_t bsu;
 	int err;
-
-	if ((err = kernel_ipcc_status(&spstatus, &spstartup)) != 0) {
-		bop_panic("Could not retrieve status registers from SP (%d)",
-		    err);
-	}
-
-	/*
-	 * krtld will ignore RB_DEBUGENTER when not accompanied by RB_KMDB.
-	 * Setting IPCC_STARTUP_KMDB_BOOT will set both, regardless of the
-	 * status of IPCC_STARTUP_KMDB.
-	 */
-	if ((spstartup & IPCC_STARTUP_KMDB_BOOT) != 0)
-		boothowto |= RB_KMDB | RB_DEBUGENTER;
-	else if ((spstartup & IPCC_STARTUP_KMDB) != 0)
-		boothowto |= RB_KMDB;
-
-	if ((spstartup & IPCC_STARTUP_VERBOSE) != 0)
-		boothowto |= RB_VERBOSE;
-
-	if ((spstartup & IPCC_STARTUP_KBM) != 0)
-		kbm_debug = B_TRUE;
-
-	if ((spstartup & IPCC_STARTUP_BOOTRD) != 0)
-		bootrd_debug = 1;
-
-	if ((spstartup & IPCC_STARTUP_PROM) != 0)
-		prom_debug = 1;
 
 	if ((spstatus & IPCC_STATUS_STARTED) != 0)
 		kernel_ipcc_ackstart();
@@ -435,12 +427,30 @@ eb_real_ipcc_properties(void)
 }
 
 void
-eb_create_properties(uint64_t ramdisk_paddr, size_t ramdisk_len)
+eb_create_properties(uint64_t ramdisk_paddr, size_t ramdisk_len,
+    uint64_t fake_spstartup)
 {
-	eb_create_common_properties(ramdisk_paddr, ramdisk_len);
+	ASSERT(ipcc_enable || fake_spstartup != 0);
+
+	uint64_t spstatus, spstartup;
+	int err;
 
 	if (ipcc_enable)
-		eb_real_ipcc_properties();
+	{
+		if ((err = kernel_ipcc_status(&spstatus, &spstartup)) != 0) {
+			bop_panic("Could not retrieve status registers from SP (%d)",
+			    err);
+		}
+	}
+	else
+	{
+		spstartup = fake_spstartup;
+	}
+
+	eb_create_common_properties(ramdisk_paddr, ramdisk_len, spstartup);
+
+	if (ipcc_enable)
+		eb_real_ipcc_properties(spstatus, spstartup);
 	else
 		eb_fake_ipcc_properties();
 }
