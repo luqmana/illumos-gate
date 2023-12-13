@@ -32,7 +32,7 @@
 #include <sys/amdzen/fch/gpio.h>
 #include <sys/amdzen/fch/iomux.h>
 #include <sys/io/fch/uart.h>
-#include <sys/io/milan/iomux.h>
+#include <sys/io/genoa/iomux.h>
 #include <sys/archsystm.h>
 #include <sys/cpu.h>
 
@@ -257,7 +257,7 @@ eb_ipcc_init(void)
 	    "high" : "low");
 
 	mmio_reg_block_t block = fch_iomux_mmio_block();
-	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 139, GPIO139);
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 139, GPIO139);
 	mmio_reg_block_unmap(&block);
 }
 

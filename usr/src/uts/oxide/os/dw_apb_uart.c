@@ -44,7 +44,7 @@
 #include <sys/uart.h>
 #include <sys/amdzen/fch/iomux.h>
 #include <sys/io/fch/uart.h>
-#include <sys/io/milan/iomux.h>
+#include <sys/io/genoa/iomux.h>
 #include <vm/kboot_mmu.h>
 
 int dw_apb_invalid_disable_intr = 0;
@@ -140,15 +140,15 @@ dw_apb_uart_iomux_pinmux_set(void)
 
 	mmio_reg_block_t block = fch_iomux_mmio_block();
 
-	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 135, UART0_CTS_L);
-	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 136, UART0_RXD);
-	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 137, UART0_RTS_L);
-	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 138, UART0_TXD);
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 135, UART0_CTS_L);
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 136, UART0_RXD);
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 137, UART0_RTS_L);
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 138, UART0_TXD);
 
-	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 140, UART1_CTS_L);
-	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 141, UART1_RXD);
-	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 142, UART1_RTS_L);
-	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 143, UART1_TXD);
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 140, UART1_CTS_L);
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 141, UART1_RXD);
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 142, UART1_RTS_L);
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 143, UART1_TXD);
 
 	mmio_reg_block_unmap(&block);
 
