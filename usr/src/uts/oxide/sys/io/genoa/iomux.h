@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2022 Oxide Computer Company
+ * Copyright 2023 Oxide Computer Company
  */
 
 #ifndef _SYS_IO_GENOA_IOMUX_H
@@ -23,7 +23,7 @@
  * alternate functions are and what the pins mean.
  *
  * This header should not generally have everything that exists in the I/O Mux.
- * That is what the general zen_data_sp3.c tables are for. Instead, this is here
+ * That is what the general zen_data_sp5.c tables are for. Instead, this is here
  * to support early boot and general things we need to do before we have the
  * full I/O multiplexing driver existing and in a useable state.
  */
@@ -69,17 +69,41 @@ extern "C" {
 #define	GENOA_FCH_IOMUX_138_UART0_TXD		0
 #define	GENOA_FCH_IOMUX_139_GPIO139		1
 
-#define	GENOA_FCH_IOMUX_140_UART1_CTS_L	0
 #define	GENOA_FCH_IOMUX_141_UART1_RXD		0
-#define	GENOA_FCH_IOMUX_142_UART1_RTS_L	0
-#define	GENOA_FCH_IOMUX_143_UART1_TXD		0
-#define	GENOA_FCH_IOMUX_144_GPIO144		1
+#define	GENOA_FCH_IOMUX_142_UART1_TXD		0
 
 #define	GENOA_FCH_RMTMUX_10_PCIE_RST1_L		0
 #define	GENOA_FCH_RMTMUX_10_EGPIO26_1		1
 #define	GENOA_FCH_RMTMUX_11_PCIE_RST2_L		0
 #define	GENOA_FCH_RMTMUX_11_EGPIO26_2		1
 
+/*
+ * The default at-reset mappings for IOMUX pins relating to UARTs on Genoa
+ * according to the PPRs are shown below.
+ *
+ *	0x87 - GPIO135		[UART0_CTS_L]
+ *	0x88 - UART0_RXD	[UART0_RXD]
+ *	0x89 - GPIO_137		[UART0_RTS_L]
+ *	0x8a - GPIO_138		[UART0_TXD]
+ *
+ *	0x8d - UART1_RXD	[UART1_RXD]
+ *	0x8e - GPIO_142		[UART1_TXD]
+ */
+static inline void
+genoa_uart_iomux_pinmux_reset(void)
+{
+	mmio_reg_block_t block = fch_iomux_mmio_block();
+
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 135, UART0_CTS_L);
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 136, UART0_RXD);
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 137, UART0_RTS_L);
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 138, UART0_TXD);
+
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 141, UART1_RXD);
+	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 142, UART1_TXD);
+
+	mmio_reg_block_unmap(&block);
+}
 
 #ifdef __cplusplus
 }

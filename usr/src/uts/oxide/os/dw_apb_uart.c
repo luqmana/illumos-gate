@@ -42,10 +42,19 @@
 #include <sys/stdbool.h>
 #include <sys/types.h>
 #include <sys/uart.h>
+#include <sys/amdzen/fch.h>
 #include <sys/amdzen/fch/iomux.h>
 #include <sys/io/fch/uart.h>
 #include <sys/io/genoa/iomux.h>
+#include <sys/io/milan/iomux.h>
+#include <sys/x86_archext.h>
 #include <vm/kboot_mmu.h>
+
+/*
+ * Comes from uts/oxide/os/fakebop.c.  We're too early to use the cpuid_*
+ * interfaces to grab the processor family to determine the FCH type.
+ */
+extern x86_chiprev_t early_chiprev;
 
 int dw_apb_invalid_disable_intr = 0;
 
@@ -114,21 +123,9 @@ dw_apb_lcr(uint8_t *lcrp, const async_databits_t db, const async_parity_t par,
 }
 
 /*
- * The default at-reset mappings for IOMUX pins relating to UARTs on Milan
- * according to the PPRs are shown below. By the time we get here it is possible
- * that some of these pins will have been remapped by the ABL based on the APCB
- * contents. Regardless, we explicitly set each pin to the function we need
- * (shown in square brackets).
- *
- *	0x87 - GPIO135		[UART0_CTS_L]
- *	0x88 - UART0_RXD	[UART0_RXD]
- *	0x89 - GPIO_137		[UART0_RTS_L]
- *	0x8a - GPIO_138		[UART0_TXD]
- *
- *	0x8c - GPIO_140		[UART1_CTS_L]
- *	0x8d - UART1_RXD	[UART1_RXD]
- *	0x8e - GPIO_142		[UART1_RTS_L]
- *	0x8f - GPIO_143		[UART1_TXD]
+ * By the time we get here it is possible that some of the UART pins have been
+ * remapped by the ABL based on the APCB contents. We explicitly set each pin to
+ * the function we need.
  */
 static void
 dw_apb_uart_iomux_pinmux_set(void)
@@ -138,19 +135,18 @@ dw_apb_uart_iomux_pinmux_set(void)
 	if (mapped)
 		return;
 
-	mmio_reg_block_t block = fch_iomux_mmio_block();
-
-	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 135, UART0_CTS_L);
-	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 136, UART0_RXD);
-	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 137, UART0_RTS_L);
-	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 138, UART0_TXD);
-
-	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 140, UART1_CTS_L);
-	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 141, UART1_RXD);
-	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 142, UART1_RTS_L);
-	GENOA_FCH_IOMUX_PINMUX_SET_MMIO(block, 143, UART1_TXD);
-
-	mmio_reg_block_unmap(&block);
+	switch (chiprev_family(early_chiprev)) {
+	case X86_PF_AMD_ROME:
+	case X86_PF_AMD_MILAN:
+		milan_uart_iomux_pinmux_reset();
+		break;
+	case X86_PF_AMD_GENOA:
+	case X86_PF_AMD_BERGAMO:
+		genoa_uart_iomux_pinmux_reset();
+		break;
+	default:
+		bop_panic("dw_apb_uart_iomux_pinmux_set: unsupported proc family\n");
+	}
 
 	mapped = true;
 }
@@ -184,11 +180,17 @@ dw_apb_uart_init(dw_apb_uart_t * const uart, const dw_apb_port_t port,
 	if ((uart->dau_flags & DAUF_MAPPED))
 		mmio_reg_block_unmap(&uart->dau_reg_block);
 
-	/*
-	 * Assume Huashan for now; this will also work for Songshan.
-	 * XXX use cpuid as a proxy as fch does?
-	 */
-	uart->dau_reg_block = huashan_uart_mmio_block(unit);
+	switch (chiprev_fch_kind(early_chiprev)) {
+	case FK_HUASHAN:
+		uart->dau_reg_block = huashan_uart_mmio_block(unit);
+		break;
+	case FK_SONGSHAN:
+		uart->dau_reg_block = songshan_uart_mmio_block(unit);
+		break;
+	default:
+		bop_panic("dw_apb_uart_init: unsupported FCH kind\n");
+	}
+
 	uart->dau_reg_thr = FCH_UART_THR_MMIO(uart->dau_reg_block);
 	uart->dau_reg_rbr = FCH_UART_RBR_MMIO(uart->dau_reg_block);
 	uart->dau_reg_lsr = FCH_UART_LSR_MMIO(uart->dau_reg_block);

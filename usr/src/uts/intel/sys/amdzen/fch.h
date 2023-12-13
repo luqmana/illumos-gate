@@ -228,6 +228,33 @@ extern "C" {
 #include <sys/bitext.h>
 #include <sys/amdzen/smn.h>
 #include <sys/amdzen/mmioreg.h>
+#include <sys/x86_archext.h>
+
+typedef enum fch_kind {
+	FK_NONE,
+	FK_HUASHAN,
+	FK_SONGSHAN
+} fch_kind_t;
+
+/*
+ * Returns the FCH model for the given chiprev.
+ *
+ * See the "FCH Identification" comment in fch.c for more information.
+ */
+static inline fch_kind_t
+chiprev_fch_kind(x86_chiprev_t chiprev)
+{
+	switch (chiprev_family(chiprev)) {
+	case X86_PF_AMD_ROME:
+	case X86_PF_AMD_MILAN:
+		return (FK_HUASHAN);
+	case X86_PF_AMD_GENOA:
+	case X86_PF_AMD_BERGAMO:
+		return (FK_SONGSHAN);
+	default:
+		return (FK_NONE);
+	}
+}
 
 /*
  * Block-lookup and register-lookup function-generating macros for run of the

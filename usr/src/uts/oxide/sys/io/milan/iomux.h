@@ -80,6 +80,37 @@ extern "C" {
 #define	MILAN_FCH_RMTMUX_11_PCIE_RST2_L		0
 #define	MILAN_FCH_RMTMUX_11_EGPIO26_2		1
 
+/*
+ * The default at-reset mappings for IOMUX pins relating to UARTs on Milan
+ * according to the PPRs are shown below.
+ *
+ *	0x87 - GPIO135		[UART0_CTS_L]
+ *	0x88 - UART0_RXD	[UART0_RXD]
+ *	0x89 - GPIO_137		[UART0_RTS_L]
+ *	0x8a - GPIO_138		[UART0_TXD]
+ *
+ *	0x8c - GPIO_140		[UART1_CTS_L]
+ *	0x8d - UART1_RXD	[UART1_RXD]
+ *	0x8e - GPIO_142		[UART1_RTS_L]
+ *	0x8f - GPIO_143		[UART1_TXD]
+ */
+static inline void
+milan_uart_iomux_pinmux_reset(void)
+{
+	mmio_reg_block_t block = fch_iomux_mmio_block();
+
+	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 135, UART0_CTS_L);
+	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 136, UART0_RXD);
+	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 137, UART0_RTS_L);
+	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 138, UART0_TXD);
+
+	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 140, UART1_CTS_L);
+	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 141, UART1_RXD);
+	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 142, UART1_RTS_L);
+	MILAN_FCH_IOMUX_PINMUX_SET_MMIO(block, 143, UART1_TXD);
+
+	mmio_reg_block_unmap(&block);
+}
 
 #ifdef __cplusplus
 }

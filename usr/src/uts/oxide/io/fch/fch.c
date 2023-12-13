@@ -36,7 +36,7 @@
  * FCH		Processor Family
  * -----------------------------
  * Huashan	Rome, Milan
- * Songshan	Genoa
+ * Songshan	Genoa, Bergamo/Siena
  *
  * The Taishan FCH incorporated into Naples processors poses challenges that
  * others do not, on account of its internal multi-die organisation, though most
@@ -871,12 +871,6 @@ CTASSERT(sizeof (fch_intrspec_t) == 12);
 
 static const uint_t INTS_PER_INTRSPEC =
 	(sizeof (fch_intrspec_t) / sizeof (uint32_t));
-
-typedef enum fch_kind {
-	FK_NONE,
-	FK_HUASHAN,
-	FK_SONGSHAN
-} fch_kind_t;
 
 typedef struct fch_def {
 	const char		*fd_nodename;
