@@ -37,76 +37,822 @@ static boolean_t pcicfg_valid;
 
 /*
  * These variables, when set, contain a discovered fabric ID.
+ * XXX: fold into df_ops?
  */
 static boolean_t df_masks_valid;
 static uint32_t df_node_shift;
 static uint32_t df_node_mask;
 static uint32_t df_comp_mask;
+static void
+df_print_dest(uint32_t dest);
 
 typedef struct df_comp {
 	uint_t dc_inst;
+	uint_t dc_comp;
 	const char *dc_name;
 	uint_t dc_ndram;
 } df_comp_t;
 
-static df_comp_t df_comp_names[0x2b] = {
-	{ 0, "UMC0", 2 },
-	{ 1, "UMC1", 2 },
-	{ 2, "UMC2", 2 },
-	{ 3, "UMC3", 2 },
-	{ 4, "UMC4", 2 },
-	{ 5, "UMC5", 2 },
-	{ 6, "UMC6", 2 },
-	{ 7, "UMC7", 2 },
-	{ 8, "CCIX0" },
-	{ 9, "CCIX1" },
-	{ 10, "CCIX2" },
-	{ 11, "CCIX3" },
-	{ 16, "CCM0", 16 },
-	{ 17, "CCM1", 16 },
-	{ 18, "CCM2", 16 },
-	{ 19, "CCM3", 16 },
-	{ 20, "CCM4", 16 },
-	{ 21, "CCM5", 16 },
-	{ 22, "CCM6", 16 },
-	{ 23, "CCM7", 16 },
-	{ 24, "IOMS0", 16 },
-	{ 25, "IOMS1", 16 },
-	{ 26, "IOMS2", 16 },
-	{ 27, "IOMS3", 16 },
-	{ 30, "PIE0", 8 },
-	{ 31, "CAKE0" },
-	{ 32, "CAKE1" },
-	{ 33, "CAKE2" },
-	{ 34, "CAKE3" },
-	{ 35, "CAKE4" },
-	{ 36, "CAKE5" },
-	{ 37, "TCDX0" },
-	{ 38, "TCDX1" },
-	{ 39, "TCDX2" },
-	{ 40, "TCDX3" },
-	{ 41, "TCDX4" },
-	{ 42, "TCDX5" },
-	{ 43, "TCDX6" },
-	{ 44, "TCDX7" },
-	{ 45, "TCDX8" },
-	{ 46, "TCDX9" },
-	{ 47, "TCDX10" },
-	{ 48, "TCDX11" }
+typedef struct df_ops {
+	uint32_t dfo_supported_gens;
+
+	uint32_t dfo_comp_names_count;
+	const df_comp_t *dfo_comp_names;
+
+	uint32_t dfo_chan_ileaves_count;
+	const char **dfo_chan_ileaves;
+
+	boolean_t (*dfo_read32_indirect_raw)(uint64_t sock, uintptr_t inst,
+	    uintptr_t func, uint16_t reg, uint32_t *valp);
+	boolean_t (*dfo_write32_indirect_raw)(uint64_t sock, uintptr_t inst,
+	    uintptr_t func, uint16_t reg, uint32_t valp);
+
+	boolean_t (*dfo_get_smn_busno)(uint64_t sock, uint8_t *busno);
+
+	boolean_t (*dfo_fetch_masks)(void);
+
+	uintptr_t dfo_dram_io_inst;
+	uintptr_t dfo_mmio_pci_inst;
+
+	void (*dfo_route_buses)(uint64_t sock, uintptr_t inst);
+	void (*dfo_route_dram)(uint64_t sock, uintptr_t inst, uint_t ndram);
+	void (*dfo_route_ioports)(uint64_t sock, uintptr_t inst);
+	void (*dfo_route_mmio)(uint64_t sock, uintptr_t inst);
+} df_ops_t;
+
+/*
+ * Specific definitions and functions to use per-supported chiprev.
+ */
+static const df_ops_t *df_ops = NULL;
+
+static boolean_t
+df_read32(uint64_t sock, const df_reg_def_t df, uint32_t *valp);
+static boolean_t
+df_write32(uint64_t sock, const df_reg_def_t df, uint32_t val);
+
+/*
+ * Milan
+ */
+
+static df_comp_t df_comp_names_milan[] = {
+	{ 0, 0, "UMC0", 2 },
+	{ 1, 1, "UMC1", 2 },
+	{ 2, 2, "UMC2", 2 },
+	{ 3, 3, "UMC3", 2 },
+	{ 4, 4, "UMC4", 2 },
+	{ 5, 5, "UMC5", 2 },
+	{ 6, 6, "UMC6", 2 },
+	{ 7, 7, "UMC7", 2 },
+	{ 8, 8, "CCIX0", 2 },
+	{ 9, 9, "CCIX1", 2 },
+	{ 10, 10, "CCIX2", 2 },
+	{ 11, 11, "CCIX3", 2 },
+	{ 16, 16, "CCM0", 16 },
+	{ 17, 17, "CCM1", 16 },
+	{ 18, 18, "CCM2", 16 },
+	{ 19, 19, "CCM3", 16 },
+	{ 20, 20, "CCM4", 16 },
+	{ 21, 21, "CCM5", 16 },
+	{ 22, 22, "CCM6", 16 },
+	{ 23, 23, "CCM7", 16 },
+	{ 24, 24, "IOMS0", 16 },
+	{ 25, 25, "IOMS1", 16 },
+	{ 26, 26, "IOMS2", 16 },
+	{ 27, 27, "IOMS3", 16 },
+	{ 30, 30, "PIE0", 8 },
+	{ 31, -1, "CAKE0" },
+	{ 32, -1, "CAKE1" },
+	{ 33, -1, "CAKE2" },
+	{ 34, -1, "CAKE3" },
+	{ 35, -1, "CAKE4" },
+	{ 36, -1, "CAKE5" },
+	{ 37, -1, "TCDX0" },
+	{ 38, -1, "TCDX1" },
+	{ 39, -1, "TCDX2" },
+	{ 40, -1, "TCDX3" },
+	{ 41, -1, "TCDX4" },
+	{ 42, -1, "TCDX5" },
+	{ 43, -1, "TCDX6" },
+	{ 44, -1, "TCDX7" },
+	{ 45, -1, "TCDX8" },
+	{ 46, -1, "TCDX9" },
+	{ 47, -1, "TCDX10" },
+	{ 48, -1, "TCDX11" }
 };
 
-static const char *df_chan_ileaves[16] = {
+static const char *df_chan_ileaves_milan[16] = {
 	"1", "2", "Reserved", "4",
 	"Reserved", "8", "6", "Reserved",
 	"Reserved", "Reserved", "Reserved", "Reserved",
 	"COD-4 2", "COD-2 4", "COD-1 8", "Reserved"
 };
 
+static boolean_t
+df_read32_indirect_raw_milan(uint64_t sock, uintptr_t inst, uintptr_t func,
+    uint16_t reg, uint32_t *valp)
+{
+	uint32_t val = 0;
+
+	val = DF_FICAA_V2_SET_TARG_INST(val, 1);
+	val = DF_FICAA_V2_SET_FUNC(val, func);
+	val = DF_FICAA_V2_SET_INST(val, inst);
+	val = DF_FICAA_V2_SET_64B(val, 0);
+	val = DF_FICAA_V2_SET_REG(val, reg >> 2);
+
+	if (!df_write32(sock, DF_FICAA_V2, val)) {
+		return (B_FALSE);
+	}
+
+	if (!df_read32(sock, DF_FICAD_LO_V2, &val)) {
+		return (B_FALSE);
+	}
+
+	*valp = val;
+	return (B_TRUE);
+}
+
+static boolean_t
+df_write32_indirect_raw_milan(uint64_t sock, uintptr_t inst, uintptr_t func,
+    uint16_t reg, uint32_t val)
+{
+	uint32_t rval = 0;
+
+	rval = DF_FICAA_V2_SET_TARG_INST(rval, 1);
+	rval = DF_FICAA_V2_SET_FUNC(rval, func);
+	rval = DF_FICAA_V2_SET_INST(rval, inst);
+	rval = DF_FICAA_V2_SET_64B(rval, 0);
+	rval = DF_FICAA_V2_SET_REG(rval, reg >> 2);
+
+	if (!df_write32(sock, DF_FICAA_V2, rval)) {
+		return (B_FALSE);
+	}
+
+	if (!df_write32(sock, DF_FICAD_LO_V2, val)) {
+		return (B_FALSE);
+	}
+
+	return (B_TRUE);
+}
+
+static boolean_t
+df_get_smn_busno_milan(uint64_t sock, uint8_t *busno)
+{
+	uint32_t df_busctl;
+
+	if (!df_read32(sock, DF_CFG_ADDR_CTL_V2, &df_busctl)) {
+		mdb_warn("failed to read DF config address\n");
+		return (B_FALSE);
+	}
+
+	if (df_busctl == PCI_EINVAL32) {
+		mdb_warn("got back PCI_EINVAL32 when reading from the df\n");
+		return (B_FALSE);
+	}
+
+	*busno = DF_CFG_ADDR_CTL_GET_BUS_NUM(df_busctl);
+
+	return (B_TRUE);
+}
+
+static boolean_t
+df_fetch_masks_milan(void)
+{
+	uint32_t fid0, fid1;
+
+	if (!df_read32(0, DF_FIDMASK0_V3, &fid0) ||
+	    !df_read32(0, DF_FIDMASK1_V3, &fid1)) {
+		mdb_warn("failed to read masks register\n");
+		return (B_FALSE);
+	}
+
+	df_node_mask = DF_FIDMASK0_V3_GET_NODE_MASK(fid0);
+	df_comp_mask = DF_FIDMASK0_V3_GET_COMP_MASK(fid0);
+	df_node_shift = DF_FIDMASK1_V3_GET_NODE_SHIFT(fid1);
+
+	return (B_TRUE);
+}
+
+static void
+df_route_buses_milan(uint64_t sock, uintptr_t inst)
+{
+	uint32_t val;
+
+	for (uint_t i = 0; i < DF_MAX_CFGMAP; i++) {
+		const df_reg_def_t def = DF_CFGMAP_V2(i);
+		if (!df_read32_indirect_raw_milan(sock, inst, def.drd_func,
+		    def.drd_reg, &val)) {
+			mdb_warn("failed to read cfgmap %u\n", i);
+			continue;
+		}
+
+		if (val == PCI_EINVAL32) {
+			mdb_warn("got back invalid read for cfgmap %u\n", i);
+			continue;
+		}
+
+		mdb_printf("%-7#x %-7#x %c%c       ",
+		    DF_CFGMAP_V2_GET_BUS_BASE(val),
+		    DF_CFGMAP_V2_GET_BUS_LIMIT(val),
+		    DF_CFGMAP_V2_GET_RE(val) ? 'R' : '-',
+		    DF_CFGMAP_V2_GET_WE(val) ? 'W' : '-');
+		df_print_dest(DF_CFGMAP_V3_GET_DEST_ID(val));
+		mdb_printf("\n");
+	}
+}
+
+static void
+df_route_dram_milan(uint64_t sock, uintptr_t inst, uint_t ndram)
+{
+	for (uint_t i = 0; i < ndram; i++) {
+		uint32_t breg, lreg;
+		uint64_t base, limit;
+		const char *chan;
+		char ileave[16];
+
+		const df_reg_def_t bdef = DF_DRAM_BASE_V2(i);
+		if (!df_read32_indirect_raw_milan(sock, inst, bdef.drd_func,
+		    bdef.drd_reg, &breg)) {
+			mdb_warn("failed to read DRAM port base %u\n", i);
+			continue;
+		}
+
+		const df_reg_def_t ldef = DF_DRAM_LIMIT_V2(i);
+		if (!df_read32_indirect_raw_milan(sock, inst, ldef.drd_func,
+		    ldef.drd_reg, &lreg)) {
+			mdb_warn("failed to read DRAM port limit %u\n", i);
+			continue;
+		}
+
+		base = DF_DRAM_BASE_V2_GET_BASE(breg);
+		base <<= DF_DRAM_BASE_V2_BASE_SHIFT;
+		limit = DF_DRAM_LIMIT_V2_GET_LIMIT(lreg);
+		limit <<= DF_DRAM_LIMIT_V2_LIMIT_SHIFT;
+		limit += DF_DRAM_LIMIT_V2_LIMIT_EXCL - 1;
+
+		chan = df_chan_ileaves_milan[
+		    DF_DRAM_BASE_V3_GET_ILV_CHAN(breg)];
+		(void) mdb_snprintf(ileave, sizeof (ileave), "%u/%s/%u/%u",
+		    DF_DRAM_BASE_V3_GET_ILV_ADDR(breg) + DF_DRAM_ILV_ADDR_BASE,
+		    chan, DF_DRAM_BASE_V3_GET_ILV_DIE(breg) + 1,
+		    DF_DRAM_BASE_V3_GET_ILV_SOCK(breg) + 1);
+
+		mdb_printf("%-?#lx %-?#lx %c%c%c     %-15s ", base, limit,
+		    DF_DRAM_BASE_V2_GET_VALID(breg) ? 'V' : '-',
+		    DF_DRAM_BASE_V2_GET_HOLE_EN(breg) ? 'H' : '-',
+		    DF_DRAM_LIMIT_V3_GET_BUS_BREAK(lreg) ?
+		    'B' : '-', ileave);
+		df_print_dest(DF_DRAM_LIMIT_V3_GET_DEST_ID(lreg));
+		mdb_printf("\n");
+	}
+}
+
+static void
+df_route_ioports_milan(uint64_t sock, uintptr_t inst)
+{
+	for (uint_t i = 0; i < DF_MAX_IO_RULES; i++) {
+		uint32_t breg, lreg, base, limit;
+
+		const df_reg_def_t bdef = DF_IO_BASE_V2(i);
+		if (!df_read32_indirect_raw_milan(sock, inst, bdef.drd_func,
+		    bdef.drd_reg, &breg)) {
+			mdb_warn("failed to read I/O port base %u\n", i);
+			continue;
+		}
+
+		const df_reg_def_t ldef = DF_IO_LIMIT_V2(i);
+		if (!df_read32_indirect_raw_milan(sock, inst, ldef.drd_func,
+		    ldef.drd_reg, &lreg)) {
+			mdb_warn("failed to read I/O port limit %u\n", i);
+			continue;
+		}
+
+		base = DF_IO_BASE_V2_GET_BASE(breg);
+		base <<= DF_IO_BASE_SHIFT;
+		limit = DF_IO_LIMIT_V2_GET_LIMIT(lreg);
+		limit <<= DF_IO_LIMIT_SHIFT;
+		limit += DF_IO_LIMIT_EXCL - 1;
+
+		mdb_printf("%-8#x %-8#x %c%c%c      ", base, limit,
+		    DF_IO_BASE_V2_GET_RE(breg) ? 'R' : '-',
+		    DF_IO_BASE_V2_GET_WE(breg) ? 'W' : '-',
+		    DF_IO_BASE_V2_GET_IE(breg) ? 'I' : '-');
+		df_print_dest(DF_IO_LIMIT_V3_GET_DEST_ID(lreg));
+		mdb_printf("\n");
+	}
+}
+
+static void
+df_route_mmio_milan(uint64_t sock, uintptr_t inst)
+{
+	for (uint_t i = 0; i < DF_MAX_MMIO_RULES; i++) {
+		uint32_t breg, lreg, creg;
+		uint64_t base, limit;
+
+		const df_reg_def_t bdef = DF_MMIO_BASE_V2(i);
+		if (!df_read32_indirect_raw_milan(sock, inst, bdef.drd_func,
+		    bdef.drd_reg, &breg)) {
+			mdb_warn("failed to read MMIO base %u\n", i);
+			continue;
+		}
+
+		const df_reg_def_t ldef = DF_MMIO_LIMIT_V2(i);
+		if (!df_read32_indirect_raw_milan(sock, inst, ldef.drd_func,
+		    ldef.drd_reg, &lreg)) {
+			mdb_warn("failed to read MMIO limit %u\n", i);
+			continue;
+		}
+
+		const df_reg_def_t cdef = DF_MMIO_CTL_V2(i);
+		if (!df_read32_indirect_raw_milan(sock, inst, cdef.drd_func,
+		    cdef.drd_reg, &creg)) {
+			mdb_warn("failed to read MMIO control %u\n", i);
+			continue;
+		}
+
+		base = (uint64_t)breg << DF_MMIO_SHIFT;
+		limit = (uint64_t)lreg << DF_MMIO_SHIFT;
+		limit += DF_MMIO_LIMIT_EXCL - 1;
+
+		mdb_printf("%-?#lx %-?#lx %c%c%c%c     ", base, limit,
+		    DF_MMIO_CTL_GET_RE(creg) ? 'R' : '-',
+		    DF_MMIO_CTL_GET_WE(creg) ? 'W' : '-',
+		    DF_MMIO_CTL_V3_GET_NP(creg) ? 'N' : '-',
+		    DF_MMIO_CTL_GET_CPU_DIS(creg) ? 'C' : '-');
+		df_print_dest(DF_MMIO_CTL_V3_GET_DEST_ID(creg));
+		mdb_printf("\n");
+	}
+}
+
+static const df_ops_t df_ops_milan = {
+	.dfo_supported_gens = DF_REV_3,
+	.dfo_comp_names_count = ARRAY_SIZE(df_comp_names_milan),
+	.dfo_comp_names = df_comp_names_milan,
+	.dfo_chan_ileaves_count = ARRAY_SIZE(df_chan_ileaves_milan),
+	.dfo_chan_ileaves = df_chan_ileaves_milan,
+	.dfo_read32_indirect_raw = df_read32_indirect_raw_milan,
+	.dfo_write32_indirect_raw = df_write32_indirect_raw_milan,
+	.dfo_get_smn_busno = df_get_smn_busno_milan,
+	.dfo_fetch_masks = df_fetch_masks_milan,
+	/*
+	 * For DRAM, default to CCM0 (we don't use a UMC because it has very few
+	 * rules). For I/O ports, use CCM0 as well as the IOMS entries don't
+	 * really have rules here. For MMIO and PCI buses, use IOMS0.
+	 */
+	.dfo_dram_io_inst = 16,
+	.dfo_mmio_pci_inst = 24,
+	.dfo_route_buses = df_route_buses_milan,
+	.dfo_route_dram = df_route_dram_milan,
+	.dfo_route_ioports = df_route_ioports_milan,
+	.dfo_route_mmio = df_route_mmio_milan,
+};
+
+/*
+ * Genoa
+ */
+
+static df_comp_t df_comp_names_genoa[] = {
+	{ 0, 0, "UMC0", 4 },
+	{ 1, 1, "UMC1", 4 },
+	{ 2, 2, "UMC2", 4 },
+	{ 3, 3, "UMC3", 4 },
+	{ 4, 4, "UMC4", 4 },
+	{ 5, 5, "UMC5", 4 },
+	{ 6, 6, "UMC6", 4 },
+	{ 7, 7, "UMC7", 4 },
+	{ 8, 8, "UMC8", 4 },
+	{ 9, 9, "UMC9", 4 },
+	{ 10, 10, "UMC10", 4 },
+	{ 11, 11, "UMC11", 4 },
+	{ 12, 12, "CMP0", 4 },
+	{ 13, 13, "CMP1", 4 },
+	{ 14, 14, "CMP2", 4 },
+	{ 15, 15, "CMP3", 4 },
+	{ 16, 96, "CCM0", 20 },
+	{ 17, 97, "CCM1", 20 },
+	{ 18, 98, "CCM2", 20 },
+	{ 19, 99, "CCM3", 20 },
+	{ 20, 100, "CCM4", 20 },
+	{ 21, 101, "CCM5", 20 },
+	{ 22, 102, "CCM6", 20 },
+	{ 23, 103, "CCM7", 20 },
+	{ 24, 108, "ACM0", 20 },
+	{ 25, 109, "ACM1", 20 },
+	{ 26, 110, "ACM2", 20 },
+	{ 27, 111, "ACM3", 20 },
+	{ 28, 112, "NCM0_IOMMU0", 20 },
+	{ 29, 113, "NCM1_IOMMU1", 20 },
+	{ 30, 114, "NCM2_IOMMU2", 20 },
+	{ 31, 115, "NCM3_IOMMU3", 20 },
+	{ 32, 120, "IOM0_IOHUBM0", 20 },
+	{ 33, 121, "IOM1_IOHUBM1", 20 },
+	{ 34, 122, "IOM2_IOHUBM2", 20 },
+	{ 35, 123, "IOM3_IOHUBM3", 20 },
+	{ 36, 32, "IOHUBS0", 1 },
+	{ 37, 33, "IOHUBS1", 1 },
+	{ 38, 34, "IOHUBS2", 1 },
+	{ 39, 35, "IOHUBS3", 1 },
+	{ 40, 124, "ICNG0" },
+	{ 41, 125, "ICNG1" },
+	{ 42, 126, "ICNG2" },
+	{ 43, 127, "ICNG3" },
+	{ 44, 119, "PIE0", 20 },
+	{ 45, -1, "CAKE0" },
+	{ 46, -1, "CAKE1" },
+	{ 47, -1, "CAKE2" },
+	{ 48, -1, "CAKE3" },
+	{ 49, -1, "CAKE4" },
+	{ 50, -1, "CAKE5" },
+	{ 51, -1, "CAKE6" },
+	{ 52, -1, "CAKE7" },
+	{ 53, -1, "CNLI0" },
+	{ 54, -1, "CNLI1" },
+	{ 55, -1, "CNLI2" },
+	{ 56, -1, "CNLI3" },
+	{ 57, -1, "PFX0" },
+	{ 58, -1, "PFX1" },
+	{ 59, -1, "PFX2" },
+	{ 60, -1, "PFX3" },
+	{ 61, -1, "PFX4" },
+	{ 62, -1, "PFX5" },
+	{ 63, -1, "PFX6" },
+	{ 64, -1, "PFX7" },
+	{ 65, -1, "SPF0", 8 },
+	{ 66, -1, "SPF1", 8 },
+	{ 67, -1, "SPF2", 8 },
+	{ 68, -1, "SPF3", 8 },
+	{ 69, -1, "SPF4", 8 },
+	{ 70, -1, "SPF5", 8 },
+	{ 71, -1, "SPF6", 8 },
+	{ 72, -1, "SPF7", 8 },
+	{ 73, -1, "SPF8", 8 },
+	{ 74, -1, "SPF9", 8 },
+	{ 75, -1, "SPF10", 8 },
+	{ 76, -1, "SPF11", 8 },
+	{ 77, -1, "SPF12", 8 },
+	{ 78, -1, "SPF13", 8 },
+	{ 79, -1, "SPF14", 8 },
+	{ 80, -1, "SPF15", 8 },
+	{ 81, -1, "TCDX0" },
+	{ 82, -1, "TCDX1" },
+	{ 83, -1, "TCDX2" },
+	{ 84, -1, "TCDX3" },
+	{ 85, -1, "TCDX4" },
+	{ 86, -1, "TCDX5" },
+	{ 87, -1, "TCDX6" },
+	{ 88, -1, "TCDX7" },
+	{ 89, -1, "TCDX8" },
+	{ 90, -1, "TCDX9" },
+	{ 91, -1, "TCDX10" },
+	{ 92, -1, "TCDX11" },
+	{ 93, -1, "TCDX12" },
+	{ 94, -1, "TCDX13" },
+	{ 95, -1, "TCDX14" },
+	{ 96, -1, "TCDX15" }
+};
+
+static const char *df_chan_ileaves_genoa[32] = {
+	"1", "2", "Reserved", "4",
+	"Reserved", "8", "Reserved", "16",
+	"32", "Reserved", "Reserved", "Reserved",
+	"Reserved", "Reserved", "Reserved", "Reserved",
+	"NPS-4 2", "NPS-2 4", "NPS-1 8", "NPS-4 3",
+	"NPS-2 6", "NPS-1 12", "NPS-2 5", "NPS-1 10",
+	"Reserved", "Reserved", "Reserved", "Reserved",
+	"Reserved", "Reserved", "Reserved", "Reserved",
+};
+
+static boolean_t
+df_read32_indirect_raw_genoa(uint64_t sock, uintptr_t inst, uintptr_t func,
+    uint16_t reg, uint32_t *valp)
+{
+	uint32_t val = 0;
+
+	val = DF_FICAA_V2_SET_TARG_INST(val, 1);
+	val = DF_FICAA_V2_SET_FUNC(val, func);
+	val = DF_FICAA_V2_SET_INST(val, inst);
+	val = DF_FICAA_V2_SET_64B(val, 0);
+	val = DF_FICAA_V4_SET_REG(val, reg >> 2);
+
+	if (!df_write32(sock, DF_FICAA_V4, val)) {
+		return (B_FALSE);
+	}
+
+	if (!df_read32(sock, DF_FICAD_LO_V4, &val)) {
+		return (B_FALSE);
+	}
+
+	*valp = val;
+	return (B_TRUE);
+}
+
+static boolean_t
+df_write32_indirect_raw_genoa(uint64_t sock, uintptr_t inst, uintptr_t func,
+    uint16_t reg, uint32_t val)
+{
+	uint32_t rval = 0;
+
+	rval = DF_FICAA_V2_SET_TARG_INST(rval, 1);
+	rval = DF_FICAA_V2_SET_INST(rval, inst);
+	rval = DF_FICAA_V2_SET_FUNC(rval, func);
+	rval = DF_FICAA_V2_SET_64B(rval, 0);
+	rval = DF_FICAA_V4_SET_REG(rval, reg >> 2);
+
+	if (!df_write32(sock, DF_FICAA_V4, rval)) {
+		return (B_FALSE);
+	}
+
+	if (!df_write32(sock, DF_FICAD_LO_V4, val)) {
+		return (B_FALSE);
+	}
+
+	return (B_TRUE);
+}
+
+static boolean_t
+df_get_smn_busno_genoa(uint64_t sock, uint8_t *busno)
+{
+	uint32_t df_busctl;
+
+	if (!df_read32(sock, DF_CFG_ADDR_CTL_V4, &df_busctl)) {
+		mdb_warn("failed to read DF config address\n");
+		return (B_FALSE);
+	}
+
+	if (df_busctl == PCI_EINVAL32) {
+		mdb_warn("got back PCI_EINVAL32 when reading from the df\n");
+		return (B_FALSE);
+	}
+
+	*busno = DF_CFG_ADDR_CTL_GET_BUS_NUM(df_busctl);
+
+	return (B_TRUE);
+}
+
+static boolean_t
+df_fetch_masks_genoa(void)
+{
+	uint32_t fid0, fid1;
+
+	if (!df_read32(0, DF_FIDMASK0_V4, &fid0) ||
+	    !df_read32(0, DF_FIDMASK1_V4, &fid1)) {
+		mdb_warn("failed to read masks register\n");
+		return (B_FALSE);
+	}
+
+	df_node_mask = DF_FIDMASK0_V3P5_GET_NODE_MASK(fid0);
+	df_comp_mask = DF_FIDMASK0_V3P5_GET_COMP_MASK(fid0);
+	df_node_shift = DF_FIDMASK1_V3P5_GET_NODE_SHIFT(fid1);
+
+	return (B_TRUE);
+}
+
+static void
+df_route_buses_genoa(uint64_t sock, uintptr_t inst)
+{
+	uint32_t breg, lreg;
+
+	for (uint_t i = 0; i < DF_MAX_CFGMAP; i++) {
+		const df_reg_def_t bdef = DF_CFGMAP_BASE_V4(i);
+		if (!df_read32_indirect_raw_genoa(sock, inst, bdef.drd_func,
+		    bdef.drd_reg, &breg)) {
+			mdb_warn("failed to read cfgmap base %u\n", i);
+			continue;
+		}
+		if (breg == PCI_EINVAL32) {
+			mdb_warn("got back invalid read for cfgmap base %u\n",
+			    i);
+			continue;
+		}
+
+		const df_reg_def_t ldef = DF_CFGMAP_LIMIT_V4(i);
+		if (!df_read32_indirect_raw_genoa(sock, inst, ldef.drd_func,
+		    ldef.drd_reg, &lreg)) {
+			mdb_warn("failed to read cfgmap limit %u\n", i);
+			continue;
+		}
+		if (lreg == PCI_EINVAL32) {
+			mdb_warn("got back invalid read for cfgmap limit %u\n",
+			    i);
+			continue;
+		}
+
+		mdb_printf("%-7#x %-7#x %c%c       ",
+		    DF_CFGMAP_BASE_V4_GET_BASE(breg),
+		    DF_CFGMAP_LIMIT_V4_GET_LIMIT(lreg),
+		    DF_CFGMAP_BASE_V4_GET_RE(breg) ? 'R' : '-',
+		    DF_CFGMAP_BASE_V4_GET_WE(breg) ? 'W' : '-');
+		df_print_dest(DF_CFGMAP_LIMIT_V4_GET_DEST_ID(lreg));
+		mdb_printf("\n");
+	}
+}
+
+static void
+df_route_dram_genoa(uint64_t sock, uintptr_t inst, uint_t ndram)
+{
+	for (uint_t i = 0; i < ndram; i++) {
+		uint32_t breg, lreg, ireg, creg;
+		uint64_t base, limit;
+		const char *chan;
+		char ileave[16];
+
+		const df_reg_def_t bdef = DF_DRAM_BASE_V4(i);
+		if (!df_read32_indirect_raw_genoa(sock, inst, bdef.drd_func,
+		    bdef.drd_reg, &breg)) {
+			mdb_warn("failed to read DRAM port base %u\n", i);
+			continue;
+		}
+
+		const df_reg_def_t ldef = DF_DRAM_LIMIT_V4(i);
+		if (!df_read32_indirect_raw_genoa(sock, inst, ldef.drd_func,
+		    ldef.drd_reg, &lreg)) {
+			mdb_warn("failed to read DRAM port limit %u\n", i);
+			continue;
+		}
+
+		const df_reg_def_t idef = DF_DRAM_ILV_V4(i);
+		if (!df_read32_indirect_raw_genoa(sock, inst, idef.drd_func,
+		    idef.drd_reg, &ireg)) {
+			mdb_warn("failed to read DRAM port ilv %u\n", i);
+			continue;
+		}
+
+		const df_reg_def_t cdef = DF_DRAM_CTL_V4(i);
+		if (!df_read32_indirect_raw_genoa(sock, inst, cdef.drd_func,
+		    cdef.drd_reg, &creg)) {
+			mdb_warn("failed to read DRAM port ctl %u\n", i);
+			continue;
+		}
+
+		base = DF_DRAM_BASE_V4_GET_ADDR(breg);
+		base <<= DF_DRAM_BASE_V4_BASE_SHIFT;
+		limit = DF_DRAM_LIMIT_V4_GET_ADDR(lreg);
+		limit <<= DF_DRAM_LIMIT_V4_LIMIT_SHIFT;
+		limit += DF_DRAM_LIMIT_V4_LIMIT_EXCL - 1;
+
+		chan = df_chan_ileaves_genoa[DF_DRAM_ILV_V4_GET_CHAN(ireg)];
+		(void) mdb_snprintf(ileave, sizeof (ileave), "%u/%s/%u/%u",
+		    DF_DRAM_ILV_V4_GET_ADDR(ireg) + DF_DRAM_ILV_ADDR_BASE,
+		    chan, DF_DRAM_ILV_V4_GET_DIE(ireg) + 1,
+		    DF_DRAM_ILV_V4_GET_SOCK(ireg) + 1);
+
+		mdb_printf("%-?#lx %-?#lx %c%c%c     %-15s ", base, limit,
+		    DF_DRAM_CTL_V4_GET_VALID(creg) ? 'V' : '-',
+		    DF_DRAM_CTL_V4_GET_HOLE_EN(creg) ? 'H' : '-',
+		    '-', // XXX: no BreakBusLock in DF4?
+		    ileave);
+		df_print_dest(DF_DRAM_CTL_V4_GET_DEST_ID(creg));
+		mdb_printf("\n");
+	}
+}
+
+static void
+df_route_ioports_genoa(uint64_t sock, uintptr_t inst)
+{
+	for (uint_t i = 0; i < DF_MAX_IO_RULES; i++) {
+		uint32_t breg, lreg, base, limit;
+
+		const df_reg_def_t bdef = DF_IO_BASE_V4(i);
+		if (!df_read32_indirect_raw_genoa(sock, inst, bdef.drd_func,
+		    bdef.drd_reg, &breg)) {
+			mdb_warn("failed to read I/O port base %u\n", i);
+			continue;
+		}
+
+		const df_reg_def_t ldef = DF_IO_LIMIT_V4(i);
+		if (!df_read32_indirect_raw_genoa(sock, inst, ldef.drd_func,
+		    ldef.drd_reg, &lreg)) {
+			mdb_warn("failed to read I/O port limit %u\n", i);
+			continue;
+		}
+
+		base = DF_IO_BASE_V4_GET_BASE(breg);
+		base <<= DF_IO_BASE_SHIFT;
+		limit = DF_IO_LIMIT_V4_GET_LIMIT(lreg);
+		limit <<= DF_IO_LIMIT_SHIFT;
+		limit += DF_IO_LIMIT_EXCL - 1;
+
+		mdb_printf("%-8#x %-8#x %c%c%c      ", base, limit,
+		    DF_IO_BASE_V4_GET_RE(breg) ? 'R' : '-',
+		    DF_IO_BASE_V4_GET_WE(breg) ? 'W' : '-',
+		    DF_IO_BASE_V4_GET_IE(breg) ? 'I' : '-');
+		df_print_dest(DF_IO_LIMIT_V4_GET_DEST_ID(lreg));
+		mdb_printf("\n");
+	}
+}
+
+static void
+df_route_mmio_genoa(uint64_t sock, uintptr_t inst)
+{
+	for (uint_t i = 0; i < DF_MAX_MMIO_RULES; i++) {
+		uint32_t breg, lreg, creg, ereg;
+		uint64_t base, limit;
+
+		const df_reg_def_t bdef = DF_MMIO_BASE_V4(i);
+		if (!df_read32_indirect_raw_genoa(sock, inst, bdef.drd_func,
+		    bdef.drd_reg, &breg)) {
+			mdb_warn("failed to read MMIO base %u\n", i);
+			continue;
+		}
+
+		const df_reg_def_t ldef = DF_MMIO_LIMIT_V4(i);
+		if (!df_read32_indirect_raw_genoa(sock, inst, ldef.drd_func,
+		    ldef.drd_reg, &lreg)) {
+			mdb_warn("failed to read MMIO limit %u\n", i);
+			continue;
+		}
+
+		const df_reg_def_t cdef = DF_MMIO_CTL_V4(i);
+		if (!df_read32_indirect_raw_genoa(sock, inst, cdef.drd_func,
+		    cdef.drd_reg, &creg)) {
+			mdb_warn("failed to read MMIO control %u\n", i);
+			continue;
+		}
+
+		const df_reg_def_t edef = DF_MMIO_EXT_V4(i);
+		if (!df_read32_indirect_raw_genoa(sock, inst, edef.drd_func,
+		    edef.drd_reg, &ereg)) {
+			mdb_warn("failed to read MMIO ext %u\n", i);
+			continue;
+		}
+
+		base = (uint64_t)breg << DF_MMIO_SHIFT |
+		    ((uint64_t)DF_MMIO_EXT_V4_GET_BASE(ereg)
+		        << DF_MMIO_EXT_SHIFT);
+		limit = (uint64_t)lreg << DF_MMIO_SHIFT |
+		    ((uint64_t)DF_MMIO_EXT_V4_GET_LIMIT(ereg)
+		        << DF_MMIO_EXT_SHIFT);
+		limit += DF_MMIO_LIMIT_EXCL - 1;
+
+		mdb_printf("%-?#lx %-?#lx %c%c%c%c     ", base, limit,
+		    DF_MMIO_CTL_GET_RE(creg) ? 'R' : '-',
+		    DF_MMIO_CTL_GET_WE(creg) ? 'W' : '-',
+		    DF_MMIO_CTL_V4_GET_NP(creg) ? 'N' : '-',
+		    DF_MMIO_CTL_GET_CPU_DIS(creg) ? 'C' : '-');
+		df_print_dest(DF_MMIO_CTL_V4_GET_DEST_ID(creg));
+		mdb_printf("\n");
+	}
+}
+
+static const df_ops_t df_ops_genoa = {
+	.dfo_supported_gens = DF_REV_4,
+	.dfo_comp_names_count = ARRAY_SIZE(df_comp_names_genoa),
+	.dfo_comp_names = df_comp_names_genoa,
+	.dfo_chan_ileaves_count = ARRAY_SIZE(df_chan_ileaves_genoa),
+	.dfo_chan_ileaves = df_chan_ileaves_genoa,
+	.dfo_read32_indirect_raw = df_read32_indirect_raw_genoa,
+	.dfo_write32_indirect_raw = df_write32_indirect_raw_genoa,
+	.dfo_get_smn_busno = df_get_smn_busno_genoa,
+	.dfo_fetch_masks = df_fetch_masks_genoa,
+	/*
+	 * For DRAM, default to CCM0 (we don't use a UMC because it has very few
+	 * rules). For I/O ports, use CCM0 as well as the IOMS entries don't
+	 * really have rules here. For MMIO and PCI buses, use IOM0_IOHUBM0.
+	 */
+	.dfo_dram_io_inst = 16,
+	.dfo_mmio_pci_inst = 32,
+	.dfo_route_buses = df_route_buses_genoa,
+	.dfo_route_dram = df_route_dram_genoa,
+	.dfo_route_ioports = df_route_ioports_genoa,
+	.dfo_route_mmio = df_route_mmio_genoa,
+};
+
+static boolean_t
+df_ops_init(void)
+{
+	df_ops = &df_ops_milan;
+	df_ops = &df_ops_genoa;
+	return (B_TRUE);
+	/*
+	x86_chiprev_t chiprev;
+
+	if (df_ops != NULL)
+		return (B_TRUE);
+
+	// TODO: should this be comparing uarch instead?
+	chiprev = cpuid_getchiprev(CPU);
+	if (chiprev_matches(chiprev, X86_CHIPREV_AMD_MILAN_ANY))
+		df_ops = &df_ops_milan;
+	else if (chiprev_matches(chiprev, X86_CHIPREV_AMD_GENOA_ANY))
+		df_ops = &df_ops_genoa;
+	else
+	{
+		mdb_warn("unsupported chiprev\n");
+		return (B_FALSE);
+	}
+
+	return (B_TRUE);
+	*/
+}
+
 static const char *
 df_comp_name(uint32_t compid)
 {
-	for (uint_t i = 0; i < ARRAY_SIZE(df_comp_names); i++) {
-		if (compid == df_comp_names[i].dc_inst) {
+	if (!df_ops_init())
+		return (NULL);
+
+	const df_comp_t *df_comp_names = df_ops->dfo_comp_names;
+	for (uint_t i = 0; i < df_ops->dfo_comp_names_count; i++) {
+		if (compid == df_comp_names[i].dc_comp) {
 			return (df_comp_names[i].dc_name);
 		}
 	}
@@ -115,15 +861,28 @@ df_comp_name(uint32_t compid)
 }
 
 static uint_t
-df_comp_ndram(uint32_t compid)
+df_comp_ndram(uint32_t instid)
 {
-	for (uint_t i = 0; i < ARRAY_SIZE(df_comp_names); i++) {
-		if (compid == df_comp_names[i].dc_inst) {
+	if (!df_ops_init())
+		return (0);
+
+	const df_comp_t *df_comp_names = df_ops->dfo_comp_names;
+	for (uint_t i = 0; i < df_ops->dfo_comp_names_count; i++) {
+		if (instid == df_comp_names[i].dc_inst) {
 			return (df_comp_names[i].dc_ndram);
 		}
 	}
 
 	return (0);
+}
+
+static boolean_t
+df_get_smn_busno(uint64_t sock, uint8_t *busno)
+{
+	if (!df_ops_init())
+		return (B_FALSE);
+
+	return (df_ops->dfo_get_smn_busno(sock, busno));
 }
 
 /*
@@ -368,7 +1127,7 @@ df_dcmd_check(uintptr_t addr, uint_t flags, boolean_t inst_set, uintptr_t inst,
 	if (!(flags & DCMD_ADDRSPEC)) {
 		mdb_warn("a register must be specified via an address\n");
 		return (DCMD_USAGE);
-	} else if ((addr & ~0x3fc) != 0) {
+	} else if ((addr & ~0xffc) != 0) {
 		mdb_warn("invalid register: 0x%x, must be 4-byte aligned\n",
 		    addr);
 		return (DCMD_ERR);
@@ -421,44 +1180,42 @@ df_write32(uint64_t sock, const df_reg_def_t df, uint32_t val)
 }
 
 static boolean_t
+df_write32_indirect_raw(uint64_t sock, uintptr_t inst, uintptr_t func,
+    uint16_t reg, uint32_t val)
+{
+	if (!df_ops_init())
+		return (B_FALSE);
+
+	return (df_ops->dfo_write32_indirect_raw(sock, inst, func, reg, val));
+}
+
+static boolean_t
 df_read32_indirect_raw(uint64_t sock, uintptr_t inst, uintptr_t func,
     uint16_t reg, uint32_t *valp)
 {
-	uint32_t val = 0;
-	const df_reg_def_t ficaa = DF_FICAA_V2;
-
-	val = DF_FICAA_V2_SET_TARG_INST(val, 1);
-	val = DF_FICAA_V2_SET_FUNC(val, func);
-	val = DF_FICAA_V2_SET_INST(val, inst);
-	val = DF_FICAA_V2_SET_64B(val, 0);
-	val = DF_FICAA_V2_SET_REG(val, reg >> 2);
-
-	if (!pcicfg_write(0, 0x18 + sock, ficaa.drd_func, ficaa.drd_reg,
-	    sizeof (val), val)) {
+	if (!df_ops_init())
 		return (B_FALSE);
-	}
 
-	if (!df_read32(sock, DF_FICAD_LO_V2, &val)) {
-		return (B_FALSE);
-	}
-
-	*valp = val;
-	return (B_TRUE);
+	return (df_ops->dfo_read32_indirect_raw(sock, inst, func, reg, valp));
 }
 
 static boolean_t
 df_read32_indirect(uint64_t sock, uintptr_t inst, const df_reg_def_t def,
     uint32_t *valp)
 {
-	if ((def.drd_gens & DF_REV_3) == 0) {
-		mdb_warn("asked to read DF reg that doesn't support Gen 3: "
-		    "func/reg: %u/0x%x, gens: 0x%x\n", def.drd_func,
-		    def.drd_reg, def.drd_gens);
+	if (!df_ops_init())
+		return (B_FALSE);
+
+	if ((def.drd_gens & df_ops->dfo_supported_gens) == 0) {
+		mdb_warn("asked to read DF reg with unsupported Gen: "
+		    "func/reg: %u/0x%x, gens: 0x%x, supported_gens: 0x%\n",
+		    def.drd_func, def.drd_reg, def.drd_gens,
+		    df_ops->dfo_supported_gens);
 		return (B_FALSE);
 	}
 
-	return (df_read32_indirect_raw(sock, inst, def.drd_func, def.drd_reg,
-	    valp));
+	return (df_ops->dfo_read32_indirect_raw(sock, inst, def.drd_func,
+	    def.drd_reg, valp));
 }
 
 int
@@ -542,19 +1299,7 @@ wrdf_dcmd(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 			return (DCMD_ERR);
 		}
 	} else {
-		uint32_t rval = 0;
-
-		rval = DF_FICAA_V2_SET_TARG_INST(rval, 1);
-		rval = DF_FICAA_V2_SET_REG(rval, addr >> 2);
-		rval = DF_FICAA_V2_SET_INST(rval, inst);
-		rval = DF_FICAA_V2_SET_64B(rval, 0);
-		rval = DF_FICAA_V2_SET_FUNC(rval, func);
-
-		if (!df_write32(sock, DF_FICAA_V2, rval)) {
-			return (DCMD_ERR);
-		}
-
-		if (!df_write32(sock, DF_FICAD_LO_V2, val)) {
+		if (!df_write32_indirect_raw(sock, inst, func, addr, val)) {
 			return (DCMD_ERR);
 		}
 	}
@@ -593,7 +1338,6 @@ static int
 smn_rw_regdef(const smn_reg_t reg, uint64_t sock, smn_rw_t rw,
     uint32_t *smn_val)
 {
-	uint32_t df_busctl;
 	uint8_t smn_busno;
 	boolean_t res;
 	size_t len = SMN_REG_SIZE(reg);
@@ -619,17 +1363,11 @@ smn_rw_regdef(const smn_reg_t reg, uint64_t sock, smn_rw_t rw,
 	const uint32_t base_addr = SMN_REG_ADDR_BASE(reg);
 	const uint32_t addr_off = SMN_REG_ADDR_OFF(reg);
 
-	if (!df_read32(sock, DF_CFG_ADDR_CTL_V2, &df_busctl)) {
-		mdb_warn("failed to read DF config address\n");
+	if (!df_get_smn_busno(sock, &smn_busno)) {
+		mdb_warn("failed to get SMN bus number\n");
 		return (DCMD_ERR);
 	}
 
-	if (df_busctl == PCI_EINVAL32) {
-		mdb_warn("got back PCI_EINVAL32 when reading from the df\n");
-		return (DCMD_ERR);
-	}
-
-	smn_busno = DF_CFG_ADDR_CTL_GET_BUS_NUM(df_busctl);
 	if (!pcicfg_write(smn_busno, AMDZEN_NB_SMN_DEVNO,
 	    AMDZEN_NB_SMN_FUNCNO, AMDZEN_NB_SMN_ADDR, sizeof (base_addr),
 	    base_addr)) {
@@ -737,18 +1475,8 @@ wrsmn_dcmd(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 static boolean_t
 df_fetch_masks(void)
 {
-	uint32_t fid0, fid1;
-
-	if (!df_read32(0, DF_FIDMASK0_V3, &fid0) ||
-	    !df_read32(0, DF_FIDMASK1_V3, &fid1)) {
-		mdb_warn("failed to read masks register\n");
+	if (!df_ops_init() || !df_ops->dfo_fetch_masks())
 		return (B_FALSE);
-	}
-
-
-	df_node_mask = DF_FIDMASK0_V3_GET_NODE_MASK(fid0);
-	df_comp_mask = DF_FIDMASK0_V3_GET_COMP_MASK(fid0);
-	df_node_shift = DF_FIDMASK1_V3_GET_NODE_SHIFT(fid1);
 
 	df_masks_valid = B_TRUE;
 	return (B_TRUE);
@@ -817,32 +1545,15 @@ df_route_dcmd_help(void)
 static int
 df_route_buses(uint_t flags, uint64_t sock, uintptr_t inst)
 {
+	if (!df_ops_init())
+		return (DCMD_ERR);
+
 	if (DCMD_HDRSPEC(flags)) {
 		mdb_printf("%-7s %-7s %-8s %s\n", "BASE", "LIMIT", "FLAGS",
 		    "DESTINATION");
 	}
 
-	for (uint_t i = 0; i < DF_MAX_CFGMAP; i++) {
-		uint32_t val;
-
-		if (!df_read32_indirect(sock, inst, DF_CFGMAP_V2(i), &val)) {
-			mdb_warn("failed to read cfgmap %u\n", i);
-			continue;
-		}
-
-		if (val == PCI_EINVAL32) {
-			mdb_warn("got back invalid read for cfgmap %u\n", i);
-			continue;
-		}
-
-		mdb_printf("%-7#x %-7#x %c%c       ",
-		    DF_CFGMAP_V2_GET_BUS_BASE(val),
-		    DF_CFGMAP_V2_GET_BUS_LIMIT(val),
-		    DF_CFGMAP_V2_GET_RE(val) ? 'R' : '-',
-		    DF_CFGMAP_V2_GET_WE(val) ? 'W' : '-');
-		df_print_dest(DF_CFGMAP_V3_GET_DEST_ID(val));
-		mdb_printf("\n");
-	}
+	df_ops->dfo_route_buses(sock, inst);
 
 	return (DCMD_OK);
 }
@@ -850,9 +1561,12 @@ df_route_buses(uint_t flags, uint64_t sock, uintptr_t inst)
 static int
 df_route_dram(uint_t flags, uint64_t sock, uintptr_t inst)
 {
-	uint_t ndram = df_comp_ndram(inst);
+	uint_t ndram;
 
-	if (ndram == 0) {
+	if (!df_ops_init())
+		return (DCMD_ERR);
+
+	if ((ndram = df_comp_ndram(inst)) == 0) {
 		mdb_warn("component 0x%x has no DRAM rules\n", inst);
 		return (DCMD_ERR);
 	}
@@ -862,45 +1576,7 @@ df_route_dram(uint_t flags, uint64_t sock, uintptr_t inst)
 		    "FLAGS", "INTERLEAVE", "DESTINATION");
 	}
 
-	for (uint_t i = 0; i < ndram; i++) {
-		uint32_t breg, lreg;
-		uint64_t base, limit;
-		const char *chan;
-		char ileave[16];
-
-		if (!df_read32_indirect(sock, inst, DF_DRAM_BASE_V2(i),
-		    &breg)) {
-			mdb_warn("failed to read DRAM port base %u\n", i);
-			continue;
-		}
-
-		if (!df_read32_indirect(sock, inst, DF_DRAM_LIMIT_V2(i),
-		    &lreg)) {
-			mdb_warn("failed to read DRAM port limit %u\n", i);
-			continue;
-		}
-
-		base = DF_DRAM_BASE_V2_GET_BASE(breg);
-		base <<= DF_DRAM_BASE_V2_BASE_SHIFT;
-		limit = DF_DRAM_LIMIT_V2_GET_LIMIT(lreg);
-		limit <<= DF_DRAM_LIMIT_V2_LIMIT_SHIFT;
-		limit += DF_DRAM_LIMIT_V2_LIMIT_EXCL - 1;
-
-		chan = df_chan_ileaves[
-		    DF_DRAM_BASE_V3_GET_ILV_CHAN(breg)];
-		(void) mdb_snprintf(ileave, sizeof (ileave), "%u/%s/%u/%u",
-		    DF_DRAM_BASE_V3_GET_ILV_ADDR(breg) + 8, chan,
-		    DF_DRAM_BASE_V3_GET_ILV_DIE(breg) + 1,
-		    DF_DRAM_BASE_V3_GET_ILV_SOCK(breg) + 1);
-
-		mdb_printf("%-?#lx %-?#lx %c%c%c     %-15s ", base, limit,
-		    DF_DRAM_BASE_V2_GET_VALID(breg) ? 'V' : '-',
-		    DF_DRAM_BASE_V2_GET_HOLE_EN(breg) ? 'H' : '-',
-		    DF_DRAM_LIMIT_V3_GET_BUS_BREAK(lreg) ?
-		    'B' : '-', ileave);
-		df_print_dest(DF_DRAM_LIMIT_V3_GET_DEST_ID(lreg));
-		mdb_printf("\n");
-	}
+	df_ops->dfo_route_dram(sock, inst, ndram);
 
 	return (DCMD_OK);
 }
@@ -908,39 +1584,15 @@ df_route_dram(uint_t flags, uint64_t sock, uintptr_t inst)
 static int
 df_route_ioports(uint_t flags, uint64_t sock, uintptr_t inst)
 {
+	if (!df_ops_init())
+		return (DCMD_ERR);
+
 	if (DCMD_HDRSPEC(flags)) {
 		mdb_printf("%-8s %-8s %-8s %s\n", "BASE", "LIMIT", "FLAGS",
-		    "DESTINAION");
+		    "DESTINATION");
 	}
 
-	for (uint_t i = 0; i < DF_MAX_IO_RULES; i++) {
-		uint32_t breg, lreg, base, limit;
-
-		if (!df_read32_indirect(sock, inst, DF_IO_BASE_V2(i),
-		    &breg)) {
-			mdb_warn("failed to read I/O port base %u\n", i);
-			continue;
-		}
-
-		if (!df_read32_indirect(sock, inst, DF_IO_LIMIT_V2(i),
-		    &lreg)) {
-			mdb_warn("failed to read I/O port limit %u\n", i);
-			continue;
-		}
-
-		base = DF_IO_BASE_V2_GET_BASE(breg);
-		base <<= DF_IO_BASE_SHIFT;
-		limit = DF_IO_LIMIT_V2_GET_LIMIT(lreg);
-		limit <<= DF_IO_LIMIT_SHIFT;
-		limit += DF_IO_LIMIT_EXCL - 1;
-
-		mdb_printf("%-8#x %-8#x %c%c%c      ", base, limit,
-		    DF_IO_BASE_V2_GET_RE(breg) ? 'R' : '-',
-		    DF_IO_BASE_V2_GET_WE(breg) ? 'W' : '-',
-		    DF_IO_BASE_V2_GET_IE(breg) ? 'I' : '-');
-		df_print_dest(DF_IO_LIMIT_V3_GET_DEST_ID(lreg));
-		mdb_printf("\n");
-	}
+	df_ops->dfo_route_ioports(sock, inst);
 
 	return (DCMD_OK);
 }
@@ -948,45 +1600,16 @@ df_route_ioports(uint_t flags, uint64_t sock, uintptr_t inst)
 static int
 df_route_mmio(uint_t flags, uint64_t sock, uintptr_t inst)
 {
+	if (!df_ops_init())
+		return (DCMD_ERR);
+
 	if (DCMD_HDRSPEC(flags)) {
 		mdb_printf("%-?s %-?s %-8s %s\n", "BASE", "LIMIT", "FLAGS",
-		    "DESTINAION");
+		    "DESTINATION");
 	}
 
-	for (uint_t i = 0; i < DF_MAX_MMIO_RULES; i++) {
-		uint32_t breg, lreg, control;
-		uint64_t base, limit;
+	df_ops->dfo_route_mmio(sock, inst);
 
-		if (!df_read32_indirect(sock, inst, DF_MMIO_BASE_V2(i),
-		    &breg)) {
-			mdb_warn("failed to read MMIO base %u\n", i);
-			continue;
-		}
-
-		if (!df_read32_indirect(sock, inst, DF_MMIO_LIMIT_V2(i),
-		    &lreg)) {
-			mdb_warn("failed to read MMIO limit %u\n", i);
-			continue;
-		}
-
-		if (!df_read32_indirect(sock, inst, DF_MMIO_CTL_V2(i),
-		    &control)) {
-			mdb_warn("failed to read MMIO control %u\n", i);
-			continue;
-		}
-
-		base = (uint64_t)breg << DF_MMIO_SHIFT;
-		limit = (uint64_t)lreg << DF_MMIO_SHIFT;
-		limit += DF_MMIO_LIMIT_EXCL - 1;
-
-		mdb_printf("%-?#lx %-?#lx %c%c%c%c     ", base, limit,
-		    DF_MMIO_CTL_GET_RE(control) ? 'R' : '-',
-		    DF_MMIO_CTL_GET_WE(control) ? 'W' : '-',
-		    DF_MMIO_CTL_V3_GET_NP(control) ? 'N' : '-',
-		    DF_MMIO_CTL_GET_CPU_DIS(control) ? 'C' : '-');
-		df_print_dest(DF_MMIO_CTL_V3_GET_DEST_ID(control));
-		mdb_printf("\n");
-	}
 	return (DCMD_OK);
 }
 
@@ -998,6 +1621,9 @@ df_route_dcmd(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	boolean_t inst_set = B_FALSE;
 	uint_t opt_b = FALSE, opt_d = FALSE, opt_I = FALSE, opt_m = FALSE;
 	uint_t count = 0;
+
+	if (!df_ops_init())
+		return (DCMD_ERR);
 
 	if (mdb_getopts(argc, argv,
 	    'b', MDB_OPT_SETBITS, TRUE, &opt_b,
@@ -1044,9 +1670,9 @@ df_route_dcmd(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	 */
 	if (!inst_set) {
 		if (opt_d || opt_I) {
-			inst = 0x10;
+			inst = df_ops->dfo_dram_io_inst;
 		} else {
-			inst = 0x18;
+			inst = df_ops->dfo_mmio_pci_inst;
 		}
 	}
 
@@ -1187,7 +1813,7 @@ dimm_report_dcmd(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	 * Attempt to read a DF entry to see if the other socket is present as a
 	 * proxy.
 	 */
-	if (!df_read32(1, DF_CFG_ADDR_CTL_V2, &val)) {
+	if (!df_read32(1, DF_FBIINFO0, &val)) {
 		mdb_warn("failed to read DF config address\n");
 		return (DCMD_ERR);
 	}
