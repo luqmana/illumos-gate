@@ -26,6 +26,8 @@ extern "C" {
 
 extern const char *milan_chan_map[8];
 
+extern const char *genoa_chan_map[12];
+
 #ifdef __cplusplus
 }
 #endif

@@ -1030,7 +1030,7 @@ static const mdb_dcmd_t dcmds[] = {
 #ifdef _KMDB
 	{ "dimm_report", "", "Summarize DRAM training and DIMMs",
 	    dimm_report_dcmd, dimm_report_dcmd_help },
-	{ "df_route", "-b | -d | -I | -m  [-i func] [-s socket]", "print df "
+	{ "df_route", "-b | -d | -I | -m  [-i inst] [-s socket]", "print df "
 	    "route tables", df_route_dcmd, df_route_dcmd_help },
 	{ "rddf", ":[-b | -i inst] [-f func] [-s socket]", "read df register",
 	    rddf_dcmd, rddf_dcmd_help },

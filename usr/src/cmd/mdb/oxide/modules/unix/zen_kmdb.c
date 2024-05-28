@@ -20,36 +20,157 @@
  * can be used for different purposes.
  */
 
+#include <mdb/mdb_ctf.h>
 #include <mdb/mdb_modapi.h>
 #include <kmdb/kmdb_modext.h>
 #include <sys/pci.h>
 #include <sys/pcie.h>
 #include <sys/pcie_impl.h>
 #include <sys/sysmacros.h>
-#include <milan/milan_physaddrs.h>
 #include <sys/amdzen/ccx.h>
 #include <sys/amdzen/umc.h>
 #include <io/amdzen/amdzen.h>
 #include "zen_umc.h"
 
+/*
+ * We don't really know how many I/O dies there are in advance;
+ * however, the theoretical max is 8 (2P Naples with 4 dies);
+ * however, on the Oxide architecture there'll only ever be 2.
+*/
+#define	MAX_IO_DIES	2
+#define	MAX_COMPS	256
+
 static uint64_t pcicfg_physaddr;
 static boolean_t pcicfg_valid;
 
-/*
- * These variables, when set, contain a discovered fabric ID.
- */
-static boolean_t df_masks_valid;
-static uint32_t df_node_shift;
-static uint32_t df_node_mask;
-static uint32_t df_comp_mask;
+struct df_comp;
+typedef struct df_comp df_comp_t;
+struct df_ops;
+typedef struct df_ops df_ops_t;
 
+static boolean_t
+df_read32(uint64_t sock, const df_reg_def_t df, uint32_t *valp);
+static boolean_t
+df_read32_indirect(uint64_t sock, uintptr_t inst, const df_reg_def_t def,
+    uint32_t *valp);
+static boolean_t
+df_read32_indirect_raw(uint64_t sock, uintptr_t inst, uintptr_t func,
+    uint16_t reg, uint32_t *valp);
+static boolean_t df_write32(uint64_t sock, const df_reg_def_t df, uint32_t val);
+static void df_print_dest(uint32_t dest);
+
+static df_ops_t *df_ops = NULL;
+
+/*
+ * Fixed and dynamically discovered properties of the DF on the current system.
+ */
+typedef struct df_ops {
+	/*
+	 * The major DF revision -- determines register definitions we'll use.
+	 */
+	const df_rev_t dfo_rev;
+
+	/*
+	 * The default instance to use for DRAM & I/O ports when not specified.
+	 */
+	const uintptr_t dfo_dram_io_inst;
+
+	/*
+	 * The default instance to use for MMIO & PCI buses when not specified.
+	 */
+	const uintptr_t dfo_mmio_pci_inst;
+
+	/*
+	 * The list of components that we know about on this system.
+	 */
+	const df_comp_t *dfo_comps;
+	const size_t dfo_comps_count;
+
+	/*
+	 * Mapping of channel interleave values to human-readable names.
+	 */
+	const char **dfo_chan_ileaves;
+	const size_t dfo_chan_ileaves_count;
+
+	/*
+	 * The number of UMC instances on this system.
+	 */
+	const size_t dfo_umc_count;
+	/*
+	 * Mapping of UMC instance to channel name.
+	 */
+	const char **dfo_umc_chan_map;
+	/*
+	 * Order to iterate through UMC instances in output (board order).
+	 */
+	const uint8_t *dfo_umc_order;
+
+	/*
+	 * The rest of the fields are dynamically discovered and cached
+	 * in df_ops_init().
+	 */
+
+	/*
+	 * Lookup table for ComponentID to an InstanceID (per-IO die).
+	 *
+	 * On first glance it would seem like we could simply hardcode these
+	 * using the mapping provided in the PPRs.  However, that assumes a
+	 * system with all components present and enabled.  In practise though
+	 * something like, e.g., some DIMM slots being empty could mean the
+	 * corresponding UMCs are disabled thus throwing off the mapping.
+	 * Instead, we dynamically read DF::FabricBlockInstanceInformation3 for
+	 * each instance to fill this in.
+	 *
+	 * Besides disabled components, some are also just never valid mapping
+	 * or routing targets (e.g. TCDXs, CAKEs).
+	 */
+	uint8_t dfo_comp_map[MAX_IO_DIES][MAX_COMPS];
+
+	/*
+	 * Mask to extract the ComponentID from a FabricID.
+	 */
+	uint32_t dfo_comp_mask;
+	/*
+	 * Mask to extract the NodeID from a FabricID.
+	 */
+	uint32_t dfo_node_mask;
+	/*
+	 * Shift to extract the NodeID from a FabricID.
+	 */
+	uint32_t dfo_node_shift;
+} df_ops_t;
+
+/*
+ * Represents a specific DF Component.
+ */
 typedef struct df_comp {
-	uint_t dc_inst;
+	/*
+	 * InstanceID -- a unique identifier within a node for accessing
+	 * per-instance component registers.
+	 *
+	 * Rome through Milan unfortunately use a discontinuous scheme hence
+	 * why we require this to be explicitly provided.
+	 */
+	const uint_t dc_inst;
+
+	/*
+	 * Component name.
+	 */
 	const char *dc_name;
-	uint_t dc_ndram;
+
+	/*
+	 * Number of supported DRAM rules for this component.
+	 */
+	const uint_t dc_ndram;
+
+	/*
+	 * Whether this component is a valid destination for routing or
+	 * mapping rules -- in essence: can it have a FabricID?
+	 */
+	const boolean_t dc_invalid_dest;
 } df_comp_t;
 
-static df_comp_t df_comp_names[0x2b] = {
+static df_comp_t milan_comps[] = {
 	{ 0, "UMC0", 2 },
 	{ 1, "UMC1", 2 },
 	{ 2, "UMC2", 2 },
@@ -58,10 +179,10 @@ static df_comp_t df_comp_names[0x2b] = {
 	{ 5, "UMC5", 2 },
 	{ 6, "UMC6", 2 },
 	{ 7, "UMC7", 2 },
-	{ 8, "CCIX0" },
-	{ 9, "CCIX1" },
-	{ 10, "CCIX2" },
-	{ 11, "CCIX3" },
+	{ 8, "CCIX0", 2 },
+	{ 9, "CCIX1", 2 },
+	{ 10, "CCIX2", 2 },
+	{ 11, "CCIX3", 2 },
 	{ 16, "CCM0", 16 },
 	{ 17, "CCM1", 16 },
 	{ 18, "CCM2", 16 },
@@ -75,38 +196,409 @@ static df_comp_t df_comp_names[0x2b] = {
 	{ 26, "IOMS2", 16 },
 	{ 27, "IOMS3", 16 },
 	{ 30, "PIE0", 8 },
-	{ 31, "CAKE0" },
-	{ 32, "CAKE1" },
-	{ 33, "CAKE2" },
-	{ 34, "CAKE3" },
-	{ 35, "CAKE4" },
-	{ 36, "CAKE5" },
-	{ 37, "TCDX0" },
-	{ 38, "TCDX1" },
-	{ 39, "TCDX2" },
-	{ 40, "TCDX3" },
-	{ 41, "TCDX4" },
-	{ 42, "TCDX5" },
-	{ 43, "TCDX6" },
-	{ 44, "TCDX7" },
-	{ 45, "TCDX8" },
-	{ 46, "TCDX9" },
-	{ 47, "TCDX10" },
-	{ 48, "TCDX11" }
+	{ 31, "CAKE0", 0, B_TRUE },
+	{ 32, "CAKE1", 0, B_TRUE },
+	{ 33, "CAKE2", 0, B_TRUE },
+	{ 34, "CAKE3", 0, B_TRUE },
+	{ 35, "CAKE4", 0, B_TRUE },
+	{ 36, "CAKE5", 0, B_TRUE },
+	{ 37, "TCDX0", 0, B_TRUE },
+	{ 38, "TCDX1", 0, B_TRUE },
+	{ 39, "TCDX2", 0, B_TRUE },
+	{ 40, "TCDX3", 0, B_TRUE },
+	{ 41, "TCDX4", 0, B_TRUE },
+	{ 42, "TCDX5", 0, B_TRUE },
+	{ 43, "TCDX6", 0, B_TRUE },
+	{ 44, "TCDX7", 0, B_TRUE },
+	{ 45, "TCDX8", 0, B_TRUE },
+	{ 46, "TCDX9", 0, B_TRUE },
+	{ 47, "TCDX10", 0, B_TRUE },
+	{ 48, "TCDX11", 0, B_TRUE }
 };
 
-static const char *df_chan_ileaves[16] = {
+static const char *milan_chan_ileaves[16] = {
 	"1", "2", "Reserved", "4",
 	"Reserved", "8", "6", "Reserved",
 	"Reserved", "Reserved", "Reserved", "Reserved",
 	"COD-4 2", "COD-2 4", "COD-1 8", "Reserved"
 };
 
-static const char *
-df_comp_name(uint32_t compid)
+static df_ops_t df_ops_milan = {
+	.dfo_rev = DF_REV_3,
+	/*
+	 * For DRAM, default to CCM0 (we don't use a UMC because it has very few
+	 * rules). For I/O ports, use CCM0 as well as the IOMS entries don't
+	 * really have rules here. For MMIO and PCI buses, use IOMS0.
+	 */
+	.dfo_dram_io_inst = 16,
+	.dfo_mmio_pci_inst = 24,
+	.dfo_comps = milan_comps,
+	.dfo_comps_count = ARRAY_SIZE(milan_comps),
+	.dfo_chan_ileaves = milan_chan_ileaves,
+	.dfo_chan_ileaves_count = ARRAY_SIZE(milan_chan_ileaves),
+	.dfo_umc_count = ARRAY_SIZE(milan_chan_map),
+	.dfo_umc_chan_map = milan_chan_map,
+	.dfo_umc_order = (const uint8_t[]) { 0, 1, 3, 2, 6, 7, 5, 4 },
+};
+
+static df_comp_t genoa_comps[] = {
+	{ 0, "UMC0", 4 },
+	{ 1, "UMC1", 4 },
+	{ 2, "UMC2", 4 },
+	{ 3, "UMC3", 4 },
+	{ 4, "UMC4", 4 },
+	{ 5, "UMC5", 4 },
+	{ 6, "UMC6", 4 },
+	{ 7, "UMC7", 4 },
+	{ 8, "UMC8", 4 },
+	{ 9, "UMC9", 4 },
+	{ 10, "UMC10", 4 },
+	{ 11, "UMC11", 4 },
+	{ 12, "CMP0", 4 },
+	{ 13, "CMP1", 4 },
+	{ 14, "CMP2", 4 },
+	{ 15, "CMP3", 4 },
+	{ 16, "CCM0", 20 },
+	{ 17, "CCM1", 20 },
+	{ 18, "CCM2", 20 },
+	{ 19, "CCM3", 20 },
+	{ 20, "CCM4", 20 },
+	{ 21, "CCM5", 20 },
+	{ 22, "CCM6", 20 },
+	{ 23, "CCM7", 20 },
+	{ 24, "ACM0", 20 },
+	{ 25, "ACM1", 20 },
+	{ 26, "ACM2", 20 },
+	{ 27, "ACM3", 20 },
+	{ 28, "NCM0_IOMMU0", 20 },
+	{ 29, "NCM1_IOMMU1", 20 },
+	{ 30, "NCM2_IOMMU2", 20 },
+	{ 31, "NCM3_IOMMU3", 20 },
+	{ 32, "IOM0_IOHUBM0", 20 },
+	{ 33, "IOM1_IOHUBM1", 20 },
+	{ 34, "IOM2_IOHUBM2", 20 },
+	{ 35, "IOM3_IOHUBM3", 20 },
+	{ 36, "IOHUBS0", 1 },
+	{ 37, "IOHUBS1", 1 },
+	{ 38, "IOHUBS2", 1 },
+	{ 39, "IOHUBS3", 1 },
+	{ 40, "ICNG0" },
+	{ 41, "ICNG1" },
+	{ 42, "ICNG2" },
+	{ 43, "ICNG3" },
+	{ 44, "PIE0", 20 },
+	{ 45, "CAKE0", 0, B_TRUE },
+	{ 46, "CAKE1", 0, B_TRUE },
+	{ 47, "CAKE2", 0, B_TRUE },
+	{ 48, "CAKE3", 0, B_TRUE },
+	{ 49, "CAKE4", 0, B_TRUE },
+	{ 50, "CAKE5", 0, B_TRUE },
+	{ 51, "CAKE6", 0, B_TRUE },
+	{ 52, "CAKE7", 0, B_TRUE },
+	{ 53, "CNLI0", 0, B_TRUE },
+	{ 54, "CNLI1", 0, B_TRUE },
+	{ 55, "CNLI2", 0, B_TRUE },
+	{ 56, "CNLI3", 0, B_TRUE },
+	{ 57, "PFX0", 0, B_TRUE },
+	{ 58, "PFX1", 0, B_TRUE },
+	{ 59, "PFX2", 0, B_TRUE },
+	{ 60, "PFX3", 0, B_TRUE },
+	{ 61, "PFX4", 0, B_TRUE },
+	{ 62, "PFX5", 0, B_TRUE },
+	{ 63, "PFX6", 0, B_TRUE },
+	{ 64, "PFX7", 0, B_TRUE },
+	{ 65, "SPF0", 8, B_TRUE },
+	{ 66, "SPF1", 8, B_TRUE },
+	{ 67, "SPF2", 8, B_TRUE },
+	{ 68, "SPF3", 8, B_TRUE },
+	{ 69, "SPF4", 8, B_TRUE },
+	{ 70, "SPF5", 8, B_TRUE },
+	{ 71, "SPF6", 8, B_TRUE },
+	{ 72, "SPF7", 8, B_TRUE },
+	{ 73, "SPF8", 8, B_TRUE },
+	{ 74, "SPF9", 8, B_TRUE },
+	{ 75, "SPF10", 8, B_TRUE },
+	{ 76, "SPF11", 8, B_TRUE },
+	{ 77, "SPF12", 8, B_TRUE },
+	{ 78, "SPF13", 8, B_TRUE },
+	{ 79, "SPF14", 8, B_TRUE },
+	{ 80, "SPF15", 8, B_TRUE },
+	{ 81, "TCDX0", 0, B_TRUE },
+	{ 82, "TCDX1", 0, B_TRUE },
+	{ 83, "TCDX2", 0, B_TRUE },
+	{ 84, "TCDX3", 0, B_TRUE },
+	{ 85, "TCDX4", 0, B_TRUE },
+	{ 86, "TCDX5", 0, B_TRUE },
+	{ 87, "TCDX6", 0, B_TRUE },
+	{ 88, "TCDX7", 0, B_TRUE },
+	{ 89, "TCDX8", 0, B_TRUE },
+	{ 90, "TCDX9", 0, B_TRUE },
+	{ 91, "TCDX10", 0, B_TRUE },
+	{ 92, "TCDX11", 0, B_TRUE },
+	{ 93, "TCDX12", 0, B_TRUE },
+	{ 94, "TCDX13", 0, B_TRUE },
+	{ 95, "TCDX14", 0, B_TRUE },
+	{ 96, "TCDX15", 0, B_TRUE }
+};
+
+static const char *genoa_chan_ileaves[32] = {
+	"1", "2", "Reserved", "4",
+	"Reserved", "8", "Reserved", "16",
+	"32", "Reserved", "Reserved", "Reserved",
+	"Reserved", "Reserved", "Reserved", "Reserved",
+	"NPS-4 2", "NPS-2 4", "NPS-1 8", "NPS-4 3",
+	"NPS-2 6", "NPS-1 12", "NPS-2 5", "NPS-1 10",
+	"Reserved", "Reserved", "Reserved", "Reserved",
+	"Reserved", "Reserved", "Reserved", "Reserved",
+};
+
+static df_ops_t df_ops_genoa = {
+	.dfo_rev = DF_REV_4,
+	/*
+	 * For DRAM, default to CCM0 (we don't use a UMC because it has very few
+	 * rules). For I/O ports, use CCM0 as well as the IOMS entries don't
+	 * really have rules here. For MMIO and PCI buses, use IOM0_IOHUBM0.
+	 */
+	.dfo_dram_io_inst = 16,
+	.dfo_mmio_pci_inst = 32,
+	.dfo_comps = genoa_comps,
+	.dfo_comps_count = ARRAY_SIZE(genoa_comps),
+	.dfo_chan_ileaves = genoa_chan_ileaves,
+	.dfo_chan_ileaves_count = ARRAY_SIZE(genoa_chan_ileaves),
+	.dfo_umc_count = ARRAY_SIZE(genoa_chan_map),
+	.dfo_umc_chan_map = genoa_chan_map,
+	.dfo_umc_order =
+	    (const uint8_t[]) { 3, 4, 0, 5, 1, 2, 9, 10, 6, 11, 7, 8 },
+};
+
+typedef struct mdb_oxide_board_cpuinfo {
+	x86_chiprev_t			obc_chiprev;
+} mdb_oxide_board_cpuinfo_t;
+
+typedef struct mdb_oxide_board_data {
+	mdb_oxide_board_cpuinfo_t	obd_cpuinfo;
+} mdb_oxide_board_data_t;
+
+static boolean_t
+df_discover_comp_ids(uint_t dfno)
 {
-	for (uint_t i = 0; i < ARRAY_SIZE(df_comp_names); i++) {
-		if (compid == df_comp_names[i].dc_inst) {
+	uint_t fabric_id, comp_id, inst_id;
+	uint32_t finfo0, finfo3;
+
+	for (uint_t i = 0; i < df_ops->dfo_comps_count; i++) {
+		inst_id = df_ops->dfo_comps[i].dc_inst;
+
+		/*
+		 * Skip components that we know have no FabricID.
+		 */
+		if (df_ops->dfo_comps[i].dc_invalid_dest)
+			continue;
+
+		if (!df_read32_indirect(dfno, inst_id, DF_FBIINFO0, &finfo0) ||
+		    !df_read32_indirect(dfno, inst_id, DF_FBIINFO3, &finfo3)) {
+			mdb_warn("failed to FBIINFO0/3 for df %u inst %u\n",
+			    dfno, inst_id);
+			return (B_FALSE);
+		}
+
+		/*
+		 * Skip components that are disabled.
+		 */
+		if (!DF_FBIINFO0_V3_GET_ENABLED(finfo0))
+			continue;
+
+		switch (df_ops->dfo_rev) {
+		case DF_REV_3:
+			fabric_id = DF_FBIINFO3_V3_GET_BLOCKID(finfo3);
+			break;
+		case DF_REV_3P5:
+			fabric_id = DF_FBIINFO3_V3P5_GET_BLOCKID(finfo3);
+			break;
+		case DF_REV_4:
+		case DF_REV_4D2:
+			fabric_id = DF_FBIINFO3_V4_GET_BLOCKID(finfo3);
+			break;
+		default:
+			mdb_warn("unexpected DF revision: %u\n",
+			    df_ops->dfo_rev);
+			return (B_FALSE);
+		}
+
+		comp_id = fabric_id & df_ops->dfo_comp_mask;
+
+		/*
+		 * Update the ComponentID -> InstanceID mapping.
+		 */
+		df_ops->dfo_comp_map[dfno][comp_id] = inst_id;
+	}
+
+	return (B_TRUE);
+}
+
+static boolean_t
+df_ops_init(void)
+{
+	GElf_Sym board_data_sym;
+	uintptr_t board_data_addr;
+	mdb_oxide_board_data_t board_data;
+	x86_chiprev_t chiprev;
+	df_reg_def_t fid0def, fid1def;
+	uint32_t fid0, fid1;
+
+	if (df_ops != NULL)
+		return (B_TRUE);
+
+	/*
+	 * We need to know what kind of system we're running on to figure out
+	 * the appropriate registers, instance/component IDs, mappings, etc.
+	 * Using the x86_chiprev routines/structures would be natural to use
+	 * but given that this is a kmdb module, we're limited by the API
+	 * surface.  Thankfully, we're already relatively constrained by the
+	 * fact this is the oxide machine architecture and so we can assume
+	 * that oxide_derive_platform() has already been run and populated the
+	 * oxide_board_data global, which conveniently has the chiprev handy.
+	 */
+
+	if (mdb_lookup_by_name("oxide_board_data", &board_data_sym) != 0 ||
+	    GELF_ST_TYPE(board_data_sym.st_info) != STT_OBJECT) {
+		mdb_warn("failed to find oxide_board_data in target\n");
+		return (B_FALSE);
+	}
+
+	if (mdb_vread(&board_data_addr, sizeof (board_data_addr),
+	    (uintptr_t)board_data_sym.st_value) != sizeof (board_data_addr)) {
+		mdb_warn("failed to read oxide_board_data addr from target\n");
+		return (B_FALSE);
+	}
+
+	if (board_data_addr == 0) {
+		mdb_warn("oxide_board_data is NULL\n");
+		return (B_FALSE);
+	}
+
+	if (mdb_ctf_vread(&board_data, "oxide_board_data_t",
+	    "mdb_oxide_board_data_t", board_data_addr, 0) != 0) {
+		mdb_warn("failed to read oxide_board_data from target\n");
+		return (B_FALSE);
+	}
+
+	chiprev = board_data.obd_cpuinfo.obc_chiprev;
+
+	if (_X86_CHIPREV_VENDOR(chiprev) != X86_VENDOR_AMD) {
+		mdb_warn("unsupported non-amd system: %u\n",
+		    _X86_CHIPREV_VENDOR(chiprev));
+		return (B_FALSE);
+	}
+
+	switch (_X86_CHIPREV_FAMILY(chiprev)) {
+	case X86_PF_AMD_MILAN:
+		df_ops = &df_ops_milan;
+		break;
+	case X86_PF_AMD_GENOA:
+		df_ops = &df_ops_genoa;
+		break;
+	default:
+		mdb_warn("unsupported amd chiprev family: %u\n",
+		    _X86_CHIPREV_FAMILY(chiprev));
+		return (B_FALSE);
+	}
+
+	/*
+	 * Now that we know what we're running on, we can grab the specific
+	 * masks/shifts needed to convert a Fabric ID to a Node/Component ID.
+	 */
+
+	switch (df_ops->dfo_rev) {
+	case DF_REV_3:
+		fid0def = DF_FIDMASK0_V3;
+		fid1def = DF_FIDMASK1_V3;
+		break;
+	case DF_REV_3P5:
+		fid0def = DF_FIDMASK0_V3P5;
+		fid1def = DF_FIDMASK1_V3P5;
+		break;
+	case DF_REV_4:
+	case DF_REV_4D2:
+		fid0def = DF_FIDMASK0_V4;
+		fid1def = DF_FIDMASK1_V4;
+		break;
+	default:
+		mdb_warn("unsupported DF revision: %u\n", df_ops->dfo_rev);
+		return (B_FALSE);
+	}
+
+	if (!df_read32(0, fid0def, &fid0) ||
+	    !df_read32(0, fid1def, &fid1)) {
+		mdb_warn("failed to read masks register\n");
+		return (B_FALSE);
+	}
+
+	switch (df_ops->dfo_rev) {
+	case DF_REV_3:
+		df_ops->dfo_node_mask = DF_FIDMASK0_V3_GET_NODE_MASK(fid0);
+		df_ops->dfo_comp_mask = DF_FIDMASK0_V3_GET_COMP_MASK(fid0);
+		df_ops->dfo_node_shift = DF_FIDMASK1_V3_GET_NODE_SHIFT(fid1);
+		break;
+	case DF_REV_3P5:
+	case DF_REV_4:
+	case DF_REV_4D2:
+		/*
+		 * DFv3.5 and DFv4 have the same format in different registers.
+		 */
+		df_ops->dfo_node_mask = DF_FIDMASK0_V3P5_GET_NODE_MASK(fid0);
+		df_ops->dfo_comp_mask = DF_FIDMASK0_V3P5_GET_COMP_MASK(fid0);
+		df_ops->dfo_node_shift = DF_FIDMASK1_V3P5_GET_NODE_SHIFT(fid1);
+		break;
+	default:
+		mdb_warn("unsupported DF revision: %u\n", df_ops->dfo_rev);
+		return (B_FALSE);
+	}
+
+	/*
+	 * The FabricID/ComponentID -> InstanceID mapping is not static so we
+	 * query and cache them in dfo_comp_map.  We'll use -1 as a sentinel
+	 * for an invalid mapping.
+	 */
+	memset(df_ops->dfo_comp_map, -1, sizeof (df_ops->dfo_comp_map));
+
+	/*
+	 * We do this unconditionally for the first socket's IO die.
+	 */
+	if (!df_discover_comp_ids(0)) {
+		mdb_warn("failed to discover ComponentIDs\n");
+		return (B_FALSE);
+	}
+
+	/*
+	 * And similarly for the second socket, if it exists (which we discover
+	 * by trying a register read against it).
+	 */
+	if (!df_read32(1, DF_FBIINFO0, &fid0)) {
+		mdb_warn("failed to read from second socket\n");
+		return (B_FALSE);
+	}
+
+	if (fid0 != PCI_EINVAL32 && !df_discover_comp_ids(1)) {
+		mdb_warn("failed to discover ComponentIDs on second socket\n");
+		return (B_FALSE);
+	}
+
+	return (B_TRUE);
+}
+
+static const char *
+df_comp_name(uint_t dfno, uint32_t compid)
+{
+	if (!df_ops_init())
+		return (NULL);
+
+	uint8_t instid = df_ops->dfo_comp_map[dfno][compid];
+	if (instid == (uint8_t)-1)
+		return (NULL);
+
+	const df_comp_t *df_comp_names = df_ops->dfo_comps;
+	for (uint_t i = 0; i < df_ops->dfo_comps_count; i++) {
+		if (instid == df_comp_names[i].dc_inst) {
 			return (df_comp_names[i].dc_name);
 		}
 	}
@@ -115,15 +607,57 @@ df_comp_name(uint32_t compid)
 }
 
 static uint_t
-df_comp_ndram(uint32_t compid)
+df_comp_ndram(uint32_t instid)
 {
-	for (uint_t i = 0; i < ARRAY_SIZE(df_comp_names); i++) {
-		if (compid == df_comp_names[i].dc_inst) {
+	if (!df_ops_init())
+		return (0);
+
+	const df_comp_t *df_comp_names = df_ops->dfo_comps;
+	for (uint_t i = 0; i < df_ops->dfo_comps_count; i++) {
+		if (instid == df_comp_names[i].dc_inst) {
 			return (df_comp_names[i].dc_ndram);
 		}
 	}
 
 	return (0);
+}
+
+static boolean_t
+df_get_smn_busno(uint64_t sock, uint8_t *busno)
+{
+	df_reg_def_t cfgdef;
+	uint32_t df_busctl;
+
+	if (!df_ops_init())
+		return (B_FALSE);
+
+	switch (df_ops->dfo_rev) {
+	case DF_REV_2:
+	case DF_REV_3:
+	case DF_REV_3P5:
+		cfgdef = DF_CFG_ADDR_CTL_V2;
+		break;
+	case DF_REV_4:
+	case DF_REV_4D2:
+		cfgdef = DF_CFG_ADDR_CTL_V4;
+		break;
+	default:
+		mdb_warn("unsupported DF revision: %u\n", df_ops->dfo_rev);
+		return (B_FALSE);
+	}
+
+	if (!df_read32(sock, cfgdef, &df_busctl)) {
+		mdb_warn("failed to read DF config address\n");
+		return (B_FALSE);
+	}
+
+	if (df_busctl == PCI_EINVAL32) {
+		mdb_warn("got back PCI_EINVAL32 when reading from the df\n");
+		return (B_FALSE);
+	}
+
+	*busno = DF_CFG_ADDR_CTL_GET_BUS_NUM(df_busctl);
+	return (B_TRUE);
 }
 
 /*
@@ -368,7 +902,7 @@ df_dcmd_check(uintptr_t addr, uint_t flags, boolean_t inst_set, uintptr_t inst,
 	if (!(flags & DCMD_ADDRSPEC)) {
 		mdb_warn("a register must be specified via an address\n");
 		return (DCMD_USAGE);
-	} else if ((addr & ~0x3fc) != 0) {
+	} else if ((addr & ~0xffc) != 0) {
 		mdb_warn("invalid register: 0x%x, must be 4-byte aligned\n",
 		    addr);
 		return (DCMD_ERR);
@@ -380,7 +914,7 @@ df_dcmd_check(uintptr_t addr, uint_t flags, boolean_t inst_set, uintptr_t inst,
 		 * however, the theoretical max is 8 (2P Naples with 4 dies);
 		 * however, on the Oxide architecture there'll only ever be 2.
 		 */
-		if (*sock > 1) {
+		if (*sock >= MAX_IO_DIES) {
 			mdb_warn("invalid socket ID: %lu\n", *sock);
 			return (DCMD_ERR);
 		}
@@ -421,24 +955,91 @@ df_write32(uint64_t sock, const df_reg_def_t df, uint32_t val)
 }
 
 static boolean_t
+df_write32_indirect_raw(uint64_t sock, uintptr_t inst, uintptr_t func,
+    uint16_t reg, uint32_t val)
+{
+	df_reg_def_t ficaa;
+	df_reg_def_t ficad;
+	uint32_t rval = 0;
+
+	if (!df_ops_init())
+		return (B_FALSE);
+
+	rval = DF_FICAA_V2_SET_TARG_INST(rval, 1);
+	rval = DF_FICAA_V2_SET_FUNC(rval, func);
+	rval = DF_FICAA_V2_SET_INST(rval, inst);
+	rval = DF_FICAA_V2_SET_64B(rval, 0);
+
+	switch (df_ops->dfo_rev) {
+	case DF_REV_2:
+	case DF_REV_3:
+	case DF_REV_3P5:
+		ficaa = DF_FICAA_V2;
+		ficad = DF_FICAD_LO_V2;
+		rval = DF_FICAA_V2_SET_REG(rval, reg >> 2);
+		break;
+	case DF_REV_4:
+	case DF_REV_4D2:
+		ficaa = DF_FICAA_V4;
+		ficad = DF_FICAD_LO_V4;
+		rval = DF_FICAA_V4_SET_REG(rval, reg >> 2);
+		break;
+	default:
+		mdb_warn("unsupported DF revision: %u\n", df_ops->dfo_rev);
+		return (B_FALSE);
+	}
+
+	if (!df_write32(sock, ficaa, rval)) {
+		return (B_FALSE);
+	}
+
+	if (!df_write32(sock, ficad, val)) {
+		return (B_FALSE);
+	}
+
+	return (B_TRUE);
+}
+
+static boolean_t
 df_read32_indirect_raw(uint64_t sock, uintptr_t inst, uintptr_t func,
     uint16_t reg, uint32_t *valp)
 {
+	df_reg_def_t ficaa;
+	df_reg_def_t ficad;
 	uint32_t val = 0;
-	const df_reg_def_t ficaa = DF_FICAA_V2;
+
+	if (!df_ops_init())
+		return (B_FALSE);
 
 	val = DF_FICAA_V2_SET_TARG_INST(val, 1);
 	val = DF_FICAA_V2_SET_FUNC(val, func);
 	val = DF_FICAA_V2_SET_INST(val, inst);
 	val = DF_FICAA_V2_SET_64B(val, 0);
-	val = DF_FICAA_V2_SET_REG(val, reg >> 2);
 
-	if (!pcicfg_write(0, 0x18 + sock, ficaa.drd_func, ficaa.drd_reg,
-	    sizeof (val), val)) {
+	switch (df_ops->dfo_rev) {
+	case DF_REV_2:
+	case DF_REV_3:
+	case DF_REV_3P5:
+		ficaa = DF_FICAA_V2;
+		ficad = DF_FICAD_LO_V2;
+		val = DF_FICAA_V2_SET_REG(val, reg >> 2);
+		break;
+	case DF_REV_4:
+	case DF_REV_4D2:
+		ficaa = DF_FICAA_V4;
+		ficad = DF_FICAD_LO_V4;
+		val = DF_FICAA_V4_SET_REG(val, reg >> 2);
+		break;
+	default:
+		mdb_warn("unsupported DF revision: %u\n", df_ops->dfo_rev);
 		return (B_FALSE);
 	}
 
-	if (!df_read32(sock, DF_FICAD_LO_V2, &val)) {
+	if (!df_write32(sock, ficaa, val)) {
+		return (B_FALSE);
+	}
+
+	if (!df_read32(sock, ficad, &val)) {
 		return (B_FALSE);
 	}
 
@@ -450,10 +1051,14 @@ static boolean_t
 df_read32_indirect(uint64_t sock, uintptr_t inst, const df_reg_def_t def,
     uint32_t *valp)
 {
-	if ((def.drd_gens & DF_REV_3) == 0) {
-		mdb_warn("asked to read DF reg that doesn't support Gen 3: "
-		    "func/reg: %u/0x%x, gens: 0x%x\n", def.drd_func,
-		    def.drd_reg, def.drd_gens);
+	if (!df_ops_init())
+		return (B_FALSE);
+
+	if ((def.drd_gens & df_ops->dfo_rev) == 0) {
+		mdb_warn("asked to read DF reg with unsupported Gen: "
+		    "func/reg: %u/0x%x, gens: 0x%x, dfo_rev: 0x%\n",
+		    def.drd_func, def.drd_reg, def.drd_gens,
+		    df_ops->dfo_rev);
 		return (B_FALSE);
 	}
 
@@ -542,19 +1147,7 @@ wrdf_dcmd(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 			return (DCMD_ERR);
 		}
 	} else {
-		uint32_t rval = 0;
-
-		rval = DF_FICAA_V2_SET_TARG_INST(rval, 1);
-		rval = DF_FICAA_V2_SET_REG(rval, addr >> 2);
-		rval = DF_FICAA_V2_SET_INST(rval, inst);
-		rval = DF_FICAA_V2_SET_64B(rval, 0);
-		rval = DF_FICAA_V2_SET_FUNC(rval, func);
-
-		if (!df_write32(sock, DF_FICAA_V2, rval)) {
-			return (DCMD_ERR);
-		}
-
-		if (!df_write32(sock, DF_FICAD_LO_V2, val)) {
+		if (!df_write32_indirect_raw(sock, inst, func, addr, val)) {
 			return (DCMD_ERR);
 		}
 	}
@@ -593,7 +1186,6 @@ static int
 smn_rw_regdef(const smn_reg_t reg, uint64_t sock, smn_rw_t rw,
     uint32_t *smn_val)
 {
-	uint32_t df_busctl;
 	uint8_t smn_busno;
 	boolean_t res;
 	size_t len = SMN_REG_SIZE(reg);
@@ -619,17 +1211,11 @@ smn_rw_regdef(const smn_reg_t reg, uint64_t sock, smn_rw_t rw,
 	const uint32_t base_addr = SMN_REG_ADDR_BASE(reg);
 	const uint32_t addr_off = SMN_REG_ADDR_OFF(reg);
 
-	if (!df_read32(sock, DF_CFG_ADDR_CTL_V2, &df_busctl)) {
-		mdb_warn("failed to read DF config address\n");
+	if (!df_get_smn_busno(sock, &smn_busno)) {
+		mdb_warn("failed to get SMN bus number\n");
 		return (DCMD_ERR);
 	}
 
-	if (df_busctl == PCI_EINVAL32) {
-		mdb_warn("got back PCI_EINVAL32 when reading from the df\n");
-		return (DCMD_ERR);
-	}
-
-	smn_busno = DF_CFG_ADDR_CTL_GET_BUS_NUM(df_busctl);
 	if (!pcicfg_write(smn_busno, AMDZEN_NB_SMN_DEVNO,
 	    AMDZEN_NB_SMN_FUNCNO, AMDZEN_NB_SMN_ADDR, sizeof (base_addr),
 	    base_addr)) {
@@ -734,29 +1320,9 @@ wrsmn_dcmd(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	return (smn_rw(addr, flags, argc, argv, SMN_WR));
 }
 
-static boolean_t
-df_fetch_masks(void)
-{
-	uint32_t fid0, fid1;
-
-	if (!df_read32(0, DF_FIDMASK0_V3, &fid0) ||
-	    !df_read32(0, DF_FIDMASK1_V3, &fid1)) {
-		mdb_warn("failed to read masks register\n");
-		return (B_FALSE);
-	}
-
-
-	df_node_mask = DF_FIDMASK0_V3_GET_NODE_MASK(fid0);
-	df_comp_mask = DF_FIDMASK0_V3_GET_COMP_MASK(fid0);
-	df_node_shift = DF_FIDMASK1_V3_GET_NODE_SHIFT(fid1);
-
-	df_masks_valid = B_TRUE;
-	return (B_TRUE);
-}
-
 /*
- * Given a data fabric fabric ID (critically not an instance ID), print
- * information about that.
+ * Given a DF fabric ID (critically not an instance ID), print information
+ * about that.
  */
 static void
 df_print_dest(uint32_t dest)
@@ -764,16 +1330,14 @@ df_print_dest(uint32_t dest)
 	uint32_t node, comp;
 	const char *name;
 
-	if (!df_masks_valid) {
-		if (!df_fetch_masks()) {
-			mdb_printf("%x", dest);
-			return;
-		}
+	if (!df_ops_init()) {
+		mdb_printf("%x", dest);
+		return;
 	}
 
-	node = (dest & df_node_mask) >> df_node_shift;
-	comp = dest & df_comp_mask;
-	name = df_comp_name(comp);
+	node = (dest & df_ops->dfo_node_mask) >> df_ops->dfo_node_shift;
+	comp = dest & df_ops->dfo_comp_mask;
+	name = df_comp_name(node, comp);
 
 	mdb_printf("%#x (%#x/%#x)", dest, node, comp);
 	if (name != NULL) {
@@ -814,18 +1378,16 @@ df_route_dcmd_help(void)
 	mdb_printf(df_route_help);
 }
 
-static int
-df_route_buses(uint_t flags, uint64_t sock, uintptr_t inst)
+static void
+df_route_buses_v2_3_3p5(df_rev_t df_rev, uint64_t sock, uintptr_t inst)
 {
-	if (DCMD_HDRSPEC(flags)) {
-		mdb_printf("%-7s %-7s %-8s %s\n", "BASE", "LIMIT", "FLAGS",
-		    "DESTINATION");
-	}
+	uint32_t val;
 
 	for (uint_t i = 0; i < DF_MAX_CFGMAP; i++) {
-		uint32_t val;
-
-		if (!df_read32_indirect(sock, inst, DF_CFGMAP_V2(i), &val)) {
+		uint32_t dest;
+		const df_reg_def_t def = DF_CFGMAP_V2(i);
+		if (!df_read32_indirect_raw(sock, inst, def.drd_func,
+		    def.drd_reg, &val)) {
 			mdb_warn("failed to read cfgmap %u\n", i);
 			continue;
 		}
@@ -835,47 +1397,136 @@ df_route_buses(uint_t flags, uint64_t sock, uintptr_t inst)
 			continue;
 		}
 
+		switch (df_rev) {
+		case DF_REV_2:
+			dest = DF_CFGMAP_V2_GET_DEST_ID(val);
+			break;
+		case DF_REV_3:
+			dest = DF_CFGMAP_V3_GET_DEST_ID(val);
+			break;
+		case DF_REV_3P5:
+			dest = DF_CFGMAP_V3P5_GET_DEST_ID(val);
+			break;
+		default:
+			mdb_warn("unexpected DF revision: %u\n", df_rev);
+			return;
+		}
+
 		mdb_printf("%-7#x %-7#x %c%c       ",
 		    DF_CFGMAP_V2_GET_BUS_BASE(val),
 		    DF_CFGMAP_V2_GET_BUS_LIMIT(val),
 		    DF_CFGMAP_V2_GET_RE(val) ? 'R' : '-',
 		    DF_CFGMAP_V2_GET_WE(val) ? 'W' : '-');
-		df_print_dest(DF_CFGMAP_V3_GET_DEST_ID(val));
+		df_print_dest(dest);
 		mdb_printf("\n");
+	}
+}
+
+static void
+df_route_buses_v4(df_rev_t df_rev, uint64_t sock, uintptr_t inst)
+{
+	uint32_t breg, lreg, dest;
+
+	for (uint_t i = 0; i < DF_MAX_CFGMAP; i++) {
+		const df_reg_def_t bdef = DF_CFGMAP_BASE_V4(i);
+		if (!df_read32_indirect_raw(sock, inst, bdef.drd_func,
+		    bdef.drd_reg, &breg)) {
+			mdb_warn("failed to read cfgmap base %u\n", i);
+			continue;
+		}
+		if (breg == PCI_EINVAL32) {
+			mdb_warn("got back invalid read for cfgmap base %u\n",
+			    i);
+			continue;
+		}
+
+		const df_reg_def_t ldef = DF_CFGMAP_LIMIT_V4(i);
+		if (!df_read32_indirect_raw(sock, inst, ldef.drd_func,
+		    ldef.drd_reg, &lreg)) {
+			mdb_warn("failed to read cfgmap limit %u\n", i);
+			continue;
+		}
+		if (lreg == PCI_EINVAL32) {
+			mdb_warn("got back invalid read for cfgmap limit %u\n",
+			    i);
+			continue;
+		}
+
+		switch (df_rev) {
+		case DF_REV_4:
+			dest = DF_CFGMAP_LIMIT_V4_GET_DEST_ID(lreg);
+			break;
+		case DF_REV_4D2:
+			dest = DF_CFGMAP_LIMIT_V4D2_GET_DEST_ID(lreg);
+			break;
+		default:
+			mdb_warn("unexpected DF revision: %u\n", df_rev);
+			return;
+		}
+
+		mdb_printf("%-7#x %-7#x %c%c       ",
+		    DF_CFGMAP_BASE_V4_GET_BASE(breg),
+		    DF_CFGMAP_LIMIT_V4_GET_LIMIT(lreg),
+		    DF_CFGMAP_BASE_V4_GET_RE(breg) ? 'R' : '-',
+		    DF_CFGMAP_BASE_V4_GET_WE(breg) ? 'W' : '-');
+		df_print_dest(dest);
+		mdb_printf("\n");
+	}
+}
+
+static int
+df_route_buses(uint_t flags, uint64_t sock, uintptr_t inst)
+{
+	if (!df_ops_init())
+		return (DCMD_ERR);
+
+	if (DCMD_HDRSPEC(flags)) {
+		mdb_printf("%-7s %-7s %-8s %s\n", "BASE", "LIMIT", "FLAGS",
+		    "DESTINATION");
+	}
+
+	switch (df_ops->dfo_rev) {
+	case DF_REV_2:
+	case DF_REV_3:
+	case DF_REV_3P5:
+		df_route_buses_v2_3_3p5(df_ops->dfo_rev, sock, inst);
+		break;
+	case DF_REV_4:
+	case DF_REV_4D2:
+		df_route_buses_v4(df_ops->dfo_rev, sock, inst);
+		break;
+	default:
+		mdb_warn("unsupported DF revision: %u\n", df_ops->dfo_rev);
+		return (DCMD_ERR);
 	}
 
 	return (DCMD_OK);
 }
 
-static int
-df_route_dram(uint_t flags, uint64_t sock, uintptr_t inst)
+static void
+df_route_dram_v2_3_3p5(df_rev_t df_rev, uint64_t sock, uintptr_t inst,
+    uint_t ndram, const char * const * df_chan_ileaves,
+    uint32_t df_chan_ileaves_count)
 {
-	uint_t ndram = df_comp_ndram(inst);
-
-	if (ndram == 0) {
-		mdb_warn("component 0x%x has no DRAM rules\n", inst);
-		return (DCMD_ERR);
-	}
-
-	if (DCMD_HDRSPEC(flags)) {
-		mdb_printf("%-?s %-?s %-7s %-15s %s\n", "BASE", "LIMIT",
-		    "FLAGS", "INTERLEAVE", "DESTINATION");
-	}
-
 	for (uint_t i = 0; i < ndram; i++) {
 		uint32_t breg, lreg;
 		uint64_t base, limit;
 		const char *chan;
 		char ileave[16];
+		uint16_t addr_ileave, chan_ileave, die_ileave, sock_ileave;
+		uint16_t dest;
+		boolean_t busbreak = B_FALSE;
 
-		if (!df_read32_indirect(sock, inst, DF_DRAM_BASE_V2(i),
-		    &breg)) {
+		const df_reg_def_t bdef = DF_DRAM_BASE_V2(i);
+		if (!df_read32_indirect_raw(sock, inst, bdef.drd_func,
+		    bdef.drd_reg, &breg)) {
 			mdb_warn("failed to read DRAM port base %u\n", i);
 			continue;
 		}
 
-		if (!df_read32_indirect(sock, inst, DF_DRAM_LIMIT_V2(i),
-		    &lreg)) {
+		const df_reg_def_t ldef = DF_DRAM_LIMIT_V2(i);
+		if (!df_read32_indirect_raw(sock, inst, ldef.drd_func,
+		    ldef.drd_reg, &lreg)) {
 			mdb_warn("failed to read DRAM port limit %u\n", i);
 			continue;
 		}
@@ -886,20 +1537,183 @@ df_route_dram(uint_t flags, uint64_t sock, uintptr_t inst)
 		limit <<= DF_DRAM_LIMIT_V2_LIMIT_SHIFT;
 		limit += DF_DRAM_LIMIT_V2_LIMIT_EXCL - 1;
 
-		chan = df_chan_ileaves[
-		    DF_DRAM_BASE_V3_GET_ILV_CHAN(breg)];
-		(void) mdb_snprintf(ileave, sizeof (ileave), "%u/%s/%u/%u",
-		    DF_DRAM_BASE_V3_GET_ILV_ADDR(breg) + 8, chan,
-		    DF_DRAM_BASE_V3_GET_ILV_DIE(breg) + 1,
-		    DF_DRAM_BASE_V3_GET_ILV_SOCK(breg) + 1);
+		switch (df_rev) {
+		case DF_REV_2:
+			addr_ileave = DF_DRAM_BASE_V2_GET_ILV_ADDR(breg);
+			chan_ileave = DF_DRAM_BASE_V2_GET_ILV_CHAN(breg);
+			die_ileave = DF_DRAM_LIMIT_V2_GET_ILV_DIE(lreg);
+			sock_ileave = DF_DRAM_LIMIT_V2_GET_ILV_SOCK(lreg);
+			dest = DF_DRAM_LIMIT_V2_GET_DEST_ID(lreg);
+			break;
+		case DF_REV_3:
+			addr_ileave = DF_DRAM_BASE_V3_GET_ILV_ADDR(breg);
+			chan_ileave = DF_DRAM_BASE_V3_GET_ILV_CHAN(breg);
+			die_ileave = DF_DRAM_BASE_V3_GET_ILV_DIE(breg);
+			sock_ileave = DF_DRAM_BASE_V3_GET_ILV_SOCK(breg);
+			dest = DF_DRAM_LIMIT_V3_GET_DEST_ID(lreg);
+			busbreak = DF_DRAM_LIMIT_V3_GET_BUS_BREAK(lreg);
+			break;
+		case DF_REV_3P5:
+			addr_ileave = DF_DRAM_BASE_V3P5_GET_ILV_ADDR(breg);
+			chan_ileave = DF_DRAM_BASE_V3P5_GET_ILV_CHAN(breg);
+			die_ileave = DF_DRAM_BASE_V3P5_GET_ILV_DIE(breg);
+			sock_ileave = DF_DRAM_BASE_V3P5_GET_ILV_SOCK(breg);
+			dest = DF_DRAM_LIMIT_V3P5_GET_DEST_ID(lreg);
+			break;
+		default:
+			mdb_warn("unexpected DF revision: %u\n", df_rev);
+			return;
+		}
 
+		if (chan_ileave >= df_chan_ileaves_count) {
+			mdb_warn("DRAM channel interleaving index %u out of \
+			    range\n", chan_ileave);
+			return;
+		}
+		chan = df_chan_ileaves[chan_ileave];
+
+		(void) mdb_snprintf(ileave, sizeof (ileave), "%u/%s/%u/%u",
+		    DF_DRAM_ILV_ADDR_BASE + addr_ileave, chan, die_ileave + 1,
+		    sock_ileave + 1);
 		mdb_printf("%-?#lx %-?#lx %c%c%c     %-15s ", base, limit,
 		    DF_DRAM_BASE_V2_GET_VALID(breg) ? 'V' : '-',
 		    DF_DRAM_BASE_V2_GET_HOLE_EN(breg) ? 'H' : '-',
-		    DF_DRAM_LIMIT_V3_GET_BUS_BREAK(lreg) ?
-		    'B' : '-', ileave);
-		df_print_dest(DF_DRAM_LIMIT_V3_GET_DEST_ID(lreg));
+		    busbreak ? 'B' : '-', ileave);
+		df_print_dest(dest);
 		mdb_printf("\n");
+	}
+}
+
+static void
+df_route_dram_v4(df_rev_t df_rev, uint64_t sock, uintptr_t inst, uint_t ndram,
+    const char * const * df_chan_ileaves, uint32_t df_chan_ileaves_count)
+{
+	for (uint_t i = 0; i < ndram; i++) {
+		df_reg_def_t bdef, ldef, idef, cdef;
+		uint32_t breg, lreg, ireg, creg;
+		uint64_t base, limit;
+		const char *chan;
+		char ileave[16];
+		uint16_t addr_ileave, chan_ileave, die_ileave, sock_ileave;
+		uint32_t dest;
+
+		switch (df_rev) {
+		case DF_REV_4:
+			bdef = DF_DRAM_BASE_V4(i);
+			ldef = DF_DRAM_LIMIT_V4(i);
+			idef = DF_DRAM_ILV_V4(i);
+			cdef = DF_DRAM_CTL_V4(i);
+			break;
+		case DF_REV_4D2:
+			bdef = DF_DRAM_BASE_V4D2(i);
+			ldef = DF_DRAM_LIMIT_V4D2(i);
+			idef = DF_DRAM_ILV_V4D2(i);
+			cdef = DF_DRAM_CTL_V4D2(i);
+			break;
+		default:
+			mdb_warn("unexpected DF revision: %u\n", df_rev);
+			return;
+		}
+
+		if (!df_read32_indirect_raw(sock, inst, bdef.drd_func,
+		    bdef.drd_reg, &breg)) {
+			mdb_warn("failed to read DRAM port base %u\n", i);
+			continue;
+		}
+
+		if (!df_read32_indirect_raw(sock, inst, ldef.drd_func,
+		    ldef.drd_reg, &lreg)) {
+			mdb_warn("failed to read DRAM port limit %u\n", i);
+			continue;
+		}
+
+		if (!df_read32_indirect_raw(sock, inst, idef.drd_func,
+		    idef.drd_reg, &ireg)) {
+			mdb_warn("failed to read DRAM port ilv %u\n", i);
+			continue;
+		}
+
+		if (!df_read32_indirect_raw(sock, inst, cdef.drd_func,
+		    cdef.drd_reg, &creg)) {
+			mdb_warn("failed to read DRAM port ctl %u\n", i);
+			continue;
+		}
+
+		base = DF_DRAM_BASE_V4_GET_ADDR(breg);
+		base <<= DF_DRAM_BASE_V4_BASE_SHIFT;
+		limit = DF_DRAM_LIMIT_V4_GET_ADDR(lreg);
+		limit <<= DF_DRAM_LIMIT_V4_LIMIT_SHIFT;
+		limit += DF_DRAM_LIMIT_V4_LIMIT_EXCL - 1;
+
+		switch (df_rev) {
+		case DF_REV_4:
+			chan_ileave = DF_DRAM_ILV_V4_GET_CHAN(ireg);
+			dest = DF_DRAM_CTL_V4_GET_DEST_ID(creg);
+			break;
+		case DF_REV_4D2:
+			chan_ileave = DF_DRAM_ILV_V4D2_GET_CHAN(ireg);
+			dest = DF_DRAM_CTL_V4D2_GET_DEST_ID(creg);
+			break;
+		default:
+			mdb_warn("unexpected DF revision: %u\n", df_rev);
+			return;
+		}
+		addr_ileave = DF_DRAM_ILV_V4_GET_ADDR(ireg);
+		die_ileave = DF_DRAM_ILV_V4_GET_DIE(ireg);
+		sock_ileave = DF_DRAM_ILV_V4_GET_SOCK(ireg);
+
+		if (chan_ileave >= df_chan_ileaves_count) {
+			mdb_warn("DRAM channel interleaving index %u out of \
+			    range\n", chan_ileave);
+			return;
+		}
+		chan = df_chan_ileaves[chan_ileave];
+
+		(void) mdb_snprintf(ileave, sizeof (ileave), "%u/%s/%u/%u",
+		    DF_DRAM_ILV_ADDR_BASE + addr_ileave, chan,
+		    die_ileave + 1, sock_ileave + 1);
+		mdb_printf("%-?#lx %-?#lx %c%c%c     %-15s ", base, limit,
+		    DF_DRAM_CTL_V4_GET_VALID(creg) ? 'V' : '-',
+		    DF_DRAM_CTL_V4_GET_HOLE_EN(creg) ? 'H' : '-',
+		    '-', ileave);
+		df_print_dest(dest);
+		mdb_printf("\n");
+	}
+}
+
+static int
+df_route_dram(uint_t flags, uint64_t sock, uintptr_t inst)
+{
+	uint_t ndram;
+
+	if (!df_ops_init())
+		return (DCMD_ERR);
+
+	if ((ndram = df_comp_ndram(inst)) == 0) {
+		mdb_warn("component 0x%x has no DRAM rules\n", inst);
+		return (DCMD_ERR);
+	}
+
+	if (DCMD_HDRSPEC(flags)) {
+		mdb_printf("%-?s %-?s %-7s %-15s %s\n", "BASE", "LIMIT",
+		    "FLAGS", "INTERLEAVE", "DESTINATION");
+	}
+
+	switch (df_ops->dfo_rev) {
+	case DF_REV_2:
+	case DF_REV_3:
+	case DF_REV_3P5:
+		df_route_dram_v2_3_3p5(df_ops->dfo_rev, sock, inst, ndram,
+		    df_ops->dfo_chan_ileaves, df_ops->dfo_chan_ileaves_count);
+		break;
+	case DF_REV_4:
+	case DF_REV_4D2:
+		df_route_dram_v4(df_ops->dfo_rev, sock, inst, ndram,
+		    df_ops->dfo_chan_ileaves, df_ops->dfo_chan_ileaves_count);
+		break;
+	default:
+		mdb_warn("unsupported DF revision: %u\n", df_ops->dfo_rev);
+		return (DCMD_ERR);
 	}
 
 	return (DCMD_OK);
@@ -908,37 +1722,82 @@ df_route_dram(uint_t flags, uint64_t sock, uintptr_t inst)
 static int
 df_route_ioports(uint_t flags, uint64_t sock, uintptr_t inst)
 {
+	if (!df_ops_init())
+		return (DCMD_ERR);
+
 	if (DCMD_HDRSPEC(flags)) {
 		mdb_printf("%-8s %-8s %-8s %s\n", "BASE", "LIMIT", "FLAGS",
-		    "DESTINAION");
+		    "DESTINATION");
 	}
 
 	for (uint_t i = 0; i < DF_MAX_IO_RULES; i++) {
+		df_reg_def_t bdef, ldef;
 		uint32_t breg, lreg, base, limit;
+		uint32_t dest;
 
-		if (!df_read32_indirect(sock, inst, DF_IO_BASE_V2(i),
-		    &breg)) {
+		switch (df_ops->dfo_rev) {
+		case DF_REV_2:
+		case DF_REV_3:
+		case DF_REV_3P5:
+			bdef = DF_IO_BASE_V2(i);
+			ldef = DF_IO_LIMIT_V2(i);
+			break;
+		case DF_REV_4:
+		case DF_REV_4D2:
+			bdef = DF_IO_BASE_V4(i);
+			ldef = DF_IO_LIMIT_V4(i);
+			break;
+		default:
+			mdb_warn("unsupported DF revision: %u\n",
+			    df_ops->dfo_rev);
+			return (DCMD_ERR);
+		}
+
+		if (!df_read32_indirect_raw(sock, inst, bdef.drd_func,
+		    bdef.drd_reg, &breg)) {
 			mdb_warn("failed to read I/O port base %u\n", i);
 			continue;
 		}
 
-		if (!df_read32_indirect(sock, inst, DF_IO_LIMIT_V2(i),
-		    &lreg)) {
+		if (!df_read32_indirect_raw(sock, inst, ldef.drd_func,
+		    ldef.drd_reg, &lreg)) {
 			mdb_warn("failed to read I/O port limit %u\n", i);
 			continue;
 		}
 
-		base = DF_IO_BASE_V2_GET_BASE(breg);
+		switch (df_ops->dfo_rev) {
+		case DF_REV_2:
+		case DF_REV_3:
+		case DF_REV_3P5:
+			base = DF_IO_BASE_V2_GET_BASE(breg);
+			limit = DF_IO_LIMIT_V2_GET_LIMIT(lreg);
+			dest = DF_IO_LIMIT_V2_GET_DEST_ID(lreg);
+			break;
+		case DF_REV_4:
+			base = DF_IO_BASE_V4_GET_BASE(breg);
+			limit = DF_IO_LIMIT_V4_GET_LIMIT(lreg);
+			dest = DF_IO_LIMIT_V4_GET_DEST_ID(lreg);
+			break;
+		case DF_REV_4D2:
+			base = DF_IO_BASE_V4_GET_BASE(breg);
+			limit = DF_IO_LIMIT_V4_GET_LIMIT(lreg);
+			dest = DF_IO_LIMIT_V4D2_GET_DEST_ID(lreg);
+			break;
+		default:
+			mdb_warn("unsupported DF revision: %u\n",
+			    df_ops->dfo_rev);
+			return (DCMD_ERR);
+		}
 		base <<= DF_IO_BASE_SHIFT;
-		limit = DF_IO_LIMIT_V2_GET_LIMIT(lreg);
 		limit <<= DF_IO_LIMIT_SHIFT;
 		limit += DF_IO_LIMIT_EXCL - 1;
 
+		/* The RE/WE/IE fields are the same across supported DF revs. */
 		mdb_printf("%-8#x %-8#x %c%c%c      ", base, limit,
 		    DF_IO_BASE_V2_GET_RE(breg) ? 'R' : '-',
 		    DF_IO_BASE_V2_GET_WE(breg) ? 'W' : '-',
 		    DF_IO_BASE_V2_GET_IE(breg) ? 'I' : '-');
-		df_print_dest(DF_IO_LIMIT_V3_GET_DEST_ID(lreg));
+		df_print_dest(dest);
 		mdb_printf("\n");
 	}
 
@@ -948,45 +1807,116 @@ df_route_ioports(uint_t flags, uint64_t sock, uintptr_t inst)
 static int
 df_route_mmio(uint_t flags, uint64_t sock, uintptr_t inst)
 {
+	if (!df_ops_init())
+		return (DCMD_ERR);
+
 	if (DCMD_HDRSPEC(flags)) {
 		mdb_printf("%-?s %-?s %-8s %s\n", "BASE", "LIMIT", "FLAGS",
-		    "DESTINAION");
+		    "DESTINATION");
 	}
 
 	for (uint_t i = 0; i < DF_MAX_MMIO_RULES; i++) {
-		uint32_t breg, lreg, control;
+		df_reg_def_t bdef, ldef, cdef;
+		uint32_t breg, lreg, creg, ereg;
 		uint64_t base, limit;
+		boolean_t np;
+		uint32_t dest;
 
-		if (!df_read32_indirect(sock, inst, DF_MMIO_BASE_V2(i),
-		    &breg)) {
+		switch (df_ops->dfo_rev) {
+		case DF_REV_2:
+		case DF_REV_3:
+		case DF_REV_3P5:
+			bdef = DF_MMIO_BASE_V2(i);
+			ldef = DF_MMIO_LIMIT_V2(i);
+			cdef = DF_MMIO_CTL_V2(i);
+			break;
+		case DF_REV_4:
+		case DF_REV_4D2:
+			bdef = DF_MMIO_BASE_V4(i);
+			ldef = DF_MMIO_LIMIT_V4(i);
+			cdef = DF_MMIO_CTL_V4(i);
+			break;
+		default:
+			mdb_warn("unsupported DF revision: %u\n",
+			    df_ops->dfo_rev);
+			return (DCMD_ERR);
+		}
+
+		if (!df_read32_indirect_raw(sock, inst, bdef.drd_func,
+		    bdef.drd_reg, &breg)) {
 			mdb_warn("failed to read MMIO base %u\n", i);
 			continue;
 		}
 
-		if (!df_read32_indirect(sock, inst, DF_MMIO_LIMIT_V2(i),
-		    &lreg)) {
+		if (!df_read32_indirect_raw(sock, inst, ldef.drd_func,
+		    ldef.drd_reg, &lreg)) {
 			mdb_warn("failed to read MMIO limit %u\n", i);
 			continue;
 		}
 
-		if (!df_read32_indirect(sock, inst, DF_MMIO_CTL_V2(i),
-		    &control)) {
+		if (!df_read32_indirect_raw(sock, inst, cdef.drd_func,
+		    cdef.drd_reg, &creg)) {
 			mdb_warn("failed to read MMIO control %u\n", i);
+			continue;
+		}
+
+		const df_reg_def_t edef = DF_MMIO_EXT_V4(i);
+		if ((df_ops->dfo_rev & DF_REV_ALL_4) &&
+		    !df_read32_indirect_raw(sock, inst, edef.drd_func,
+		    edef.drd_reg, &ereg)) {
+			mdb_warn("failed to read MMIO ext %u\n", i);
 			continue;
 		}
 
 		base = (uint64_t)breg << DF_MMIO_SHIFT;
 		limit = (uint64_t)lreg << DF_MMIO_SHIFT;
+
+		switch (df_ops->dfo_rev) {
+		case DF_REV_2:
+			np = DF_MMIO_CTL_V2_GET_NP(creg);
+			dest = DF_MMIO_CTL_V2_GET_DEST_ID(creg);
+			break;
+		case DF_REV_3:
+			np = DF_MMIO_CTL_V3_GET_NP(creg);
+			dest = DF_MMIO_CTL_V3_GET_DEST_ID(creg);
+			break;
+		case DF_REV_3P5:
+			np = DF_MMIO_CTL_V3_GET_NP(creg);
+			dest = DF_MMIO_CTL_V3P5_GET_DEST_ID(creg);
+			break;
+		case DF_REV_4:
+			base |= (uint64_t)DF_MMIO_EXT_V4_GET_BASE(ereg)
+			    << DF_MMIO_EXT_SHIFT;
+			limit |= (uint64_t)DF_MMIO_EXT_V4_GET_LIMIT(ereg)
+			    << DF_MMIO_EXT_SHIFT;
+
+			np = DF_MMIO_CTL_V4_GET_NP(creg);
+			dest = DF_MMIO_CTL_V4_GET_DEST_ID(creg);
+			break;
+		case DF_REV_4D2:
+			base |= (uint64_t)DF_MMIO_EXT_V4_GET_BASE(ereg)
+			    << DF_MMIO_EXT_SHIFT;
+			limit |= (uint64_t)DF_MMIO_EXT_V4_GET_LIMIT(ereg)
+			    << DF_MMIO_EXT_SHIFT;
+
+			np = DF_MMIO_CTL_V4_GET_NP(creg);
+			dest = DF_MMIO_CTL_V4D2_GET_DEST_ID(creg);
+			break;
+		default:
+			mdb_warn("unsupported DF revision: %u\n",
+			    df_ops->dfo_rev);
+			return (DCMD_ERR);
+		}
 		limit += DF_MMIO_LIMIT_EXCL - 1;
 
 		mdb_printf("%-?#lx %-?#lx %c%c%c%c     ", base, limit,
-		    DF_MMIO_CTL_GET_RE(control) ? 'R' : '-',
-		    DF_MMIO_CTL_GET_WE(control) ? 'W' : '-',
-		    DF_MMIO_CTL_V3_GET_NP(control) ? 'N' : '-',
-		    DF_MMIO_CTL_GET_CPU_DIS(control) ? 'C' : '-');
-		df_print_dest(DF_MMIO_CTL_V3_GET_DEST_ID(control));
+		    DF_MMIO_CTL_GET_RE(creg) ? 'R' : '-',
+		    DF_MMIO_CTL_GET_WE(creg) ? 'W' : '-',
+		    np ? 'N' : '-', DF_MMIO_CTL_GET_CPU_DIS(creg) ? 'C' : '-');
+		df_print_dest(dest);
 		mdb_printf("\n");
 	}
+
 	return (DCMD_OK);
 }
 
@@ -998,6 +1928,9 @@ df_route_dcmd(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	boolean_t inst_set = B_FALSE;
 	uint_t opt_b = FALSE, opt_d = FALSE, opt_I = FALSE, opt_m = FALSE;
 	uint_t count = 0;
+
+	if (!df_ops_init())
+		return (DCMD_ERR);
 
 	if (mdb_getopts(argc, argv,
 	    'b', MDB_OPT_SETBITS, TRUE, &opt_b,
@@ -1037,16 +1970,11 @@ df_route_dcmd(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 		return (DCMD_ERR);
 	}
 
-	/*
-	 * For DRAM, default to CCM0 (we don't use a UMC because it has very few
-	 * rules). For I/O ports, use CCM0 as well as the IOMS entries don't
-	 * really have rules here. For MMIO and PCI buses, use IOMS0.
-	 */
 	if (!inst_set) {
 		if (opt_d || opt_I) {
-			inst = 0x10;
+			inst = df_ops->dfo_dram_io_inst;
 		} else {
-			inst = 0x18;
+			inst = df_ops->dfo_mmio_pci_inst;
 		}
 	}
 
@@ -1114,17 +2042,18 @@ dimm_report_dimm_present(uint8_t sock, uint8_t umcno, uint8_t dimm,
 }
 
 /*
- * Output in board order, not UMC order (hence umc_order[] below) a summary of
+ * Output in board order, not UMC order (hence dfo_umc_order[]), a summary of
  * training information for each DRAM channel.
  */
 static int
 dimm_report_dcmd_sock(uint8_t sock)
 {
-	const uint8_t umc_order[8] = { 0, 1, 3, 2, 6, 7, 5, 4 };
+	if (!df_ops_init())
+		return (DCMD_ERR);
 
-	for (size_t i = 0; i < ARRAY_SIZE(umc_order); i++) {
-		const uint8_t umcno = umc_order[i];
-		const char *brdchan = milan_chan_map[umcno];
+	for (size_t i = 0; i < df_ops->dfo_umc_count; i++) {
+		const uint8_t umcno = df_ops->dfo_umc_order[i];
+		const char *brdchan = df_ops->dfo_umc_chan_map[umcno];
 		int ret;
 		boolean_t train, dimm0, dimm1;
 
@@ -1187,7 +2116,7 @@ dimm_report_dcmd(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	 * Attempt to read a DF entry to see if the other socket is present as a
 	 * proxy.
 	 */
-	if (!df_read32(1, DF_CFG_ADDR_CTL_V2, &val)) {
+	if (!df_read32(1, DF_FBIINFO0, &val)) {
 		mdb_warn("failed to read DF config address\n");
 		return (DCMD_ERR);
 	}
