@@ -28,7 +28,8 @@
 MODULE = unix.so
 MDBTGT = kvm
 
-MODSRCS = unix.c i86mmu.c xcall.c apob.c zen_umc.c
+MODSRCS = unix.c i86mmu.c xcall.c apob.c
+MODSRCS += genoa_impl.c milan_impl.c
 MODASMSRCS = unix_sup.S
 
 KMODSRCS = $(MODSRCS) zen_kmdb.c
@@ -41,6 +42,8 @@ include ../../../../../Makefile.cmd.64
 include ../../../../intel/Makefile.amd64
 include ../../../Makefile.oxide
 include ../../../../Makefile.module
+
+MODSRCS_DIR = ../amdzen
 
 CPPFLAGS += -DMP -D_MACHDEP
 CPPFLAGS += -I../../../../common

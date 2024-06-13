@@ -14,31 +14,25 @@
  */
 
 /*
- * Shared Zen UMC data.
+ * Genoa DF and UMC data shared among other files.
  */
 
-const char *milan_chan_map[8] = {
-	[0] = "A",
-	[1] = "B",
-	[2] = "D",
-	[3] = "C",
-	[4] = "H",
-	[5] = "G",
-	[6] = "E",
-	[7] = "F",
-};
+#ifndef	_GENOA_IMPL_H
+#define	_GENOA_IMPL_H
 
-const char *genoa_chan_map[12] = {
-	[0] = "C",
-	[1] = "E",
-	[2] = "F",
-	[3] = "A",
-	[4] = "B",
-	[5] = "D",
-	[6] = "I",
-	[7] = "K",
-	[8] = "L",
-	[9] = "G",
-	[10] = "H",
-	[11] = "J",
-};
+#include "../zen_kmdb_impl.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+extern const char *genoa_chan_ileaves[32];
+extern const char *genoa_chan_map[12];
+extern const uint8_t genoa_chan_umc_order[12];
+extern df_comp_t genoa_comps[97];
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _GENOA_IMPL_H */

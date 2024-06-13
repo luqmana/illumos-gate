@@ -32,8 +32,8 @@
 #include <sys/apob_impl.h>
 #include <milan_apob.h>
 
+#include "amdzen/milan_impl.h"
 #include "apob_mod.h"
-#include "zen_umc.h"
 
 typedef struct mdb_apob_apob_hdl {
 	uintptr_t ah_header;

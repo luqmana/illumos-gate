@@ -30,198 +30,15 @@
 #include <sys/amdzen/ccx.h>
 #include <sys/amdzen/umc.h>
 #include <io/amdzen/amdzen.h>
-#include "zen_umc.h"
 
-/*
- * We don't really know how many I/O dies there are in advance;
- * however, the theoretical max is 8 (2P Naples with 4 dies);
- * however, on the Oxide architecture there'll only ever be 2.
-*/
-#define	MAX_IO_DIES	2
-#define	MAX_COMPS	256
+#include "zen_kmdb_impl.h"
+#include "amdzen/genoa_impl.h"
+#include "amdzen/milan_impl.h"
 
 static uint64_t pcicfg_physaddr;
 static boolean_t pcicfg_valid;
 
-struct df_comp;
-typedef struct df_comp df_comp_t;
-struct df_ops;
-typedef struct df_ops df_ops_t;
-
-static boolean_t
-df_read32(uint64_t sock, const df_reg_def_t df, uint32_t *valp);
-static boolean_t
-df_read32_indirect(uint64_t sock, uintptr_t inst, const df_reg_def_t def,
-    uint32_t *valp);
-static boolean_t
-df_read32_indirect_raw(uint64_t sock, uintptr_t inst, uintptr_t func,
-    uint16_t reg, uint32_t *valp);
-static boolean_t df_write32(uint64_t sock, const df_reg_def_t df, uint32_t val);
-static void df_print_dest(uint32_t dest);
-
 static df_ops_t *df_ops = NULL;
-
-/*
- * Fixed and dynamically discovered properties of the DF on the current system.
- */
-typedef struct df_ops {
-	/*
-	 * The major DF revision -- determines register definitions we'll use.
-	 */
-	const df_rev_t dfo_rev;
-
-	/*
-	 * The default instance to use for DRAM & I/O ports when not specified.
-	 */
-	const uintptr_t dfo_dram_io_inst;
-
-	/*
-	 * The default instance to use for MMIO & PCI buses when not specified.
-	 */
-	const uintptr_t dfo_mmio_pci_inst;
-
-	/*
-	 * The list of components that we know about on this system.
-	 */
-	const df_comp_t *dfo_comps;
-	const size_t dfo_comps_count;
-
-	/*
-	 * Mapping of channel interleave values to human-readable names.
-	 */
-	const char **dfo_chan_ileaves;
-	const size_t dfo_chan_ileaves_count;
-
-	/*
-	 * The number of UMC instances on this system.
-	 */
-	const size_t dfo_umc_count;
-	/*
-	 * Mapping of UMC instance to channel name.
-	 */
-	const char **dfo_umc_chan_map;
-	/*
-	 * Order to iterate through UMC instances in output (board order).
-	 */
-	const uint8_t *dfo_umc_order;
-
-	/*
-	 * The rest of the fields are dynamically discovered and cached
-	 * in df_ops_init().
-	 */
-
-	/*
-	 * Lookup table for ComponentID to an InstanceID (per-IO die).
-	 *
-	 * On first glance it would seem like we could simply hardcode these
-	 * using the mapping provided in the PPRs.  However, that assumes a
-	 * system with all components present and enabled.  In practise though
-	 * something like, e.g., some DIMM slots being empty could mean the
-	 * corresponding UMCs are disabled thus throwing off the mapping.
-	 * Instead, we dynamically read DF::FabricBlockInstanceInformation3 for
-	 * each instance to fill this in.
-	 *
-	 * Besides disabled components, some are also just never valid mapping
-	 * or routing targets (e.g. TCDXs, CAKEs).
-	 */
-	uint8_t dfo_comp_map[MAX_IO_DIES][MAX_COMPS];
-
-	/*
-	 * Mask to extract the ComponentID from a FabricID.
-	 */
-	uint32_t dfo_comp_mask;
-	/*
-	 * Mask to extract the NodeID from a FabricID.
-	 */
-	uint32_t dfo_node_mask;
-	/*
-	 * Shift to extract the NodeID from a FabricID.
-	 */
-	uint32_t dfo_node_shift;
-} df_ops_t;
-
-/*
- * Represents a specific DF Component.
- */
-typedef struct df_comp {
-	/*
-	 * InstanceID -- a unique identifier within a node for accessing
-	 * per-instance component registers.
-	 *
-	 * Rome through Milan unfortunately use a discontinuous scheme hence
-	 * why we require this to be explicitly provided.
-	 */
-	const uint_t dc_inst;
-
-	/*
-	 * Component name.
-	 */
-	const char *dc_name;
-
-	/*
-	 * Number of supported DRAM rules for this component.
-	 */
-	const uint_t dc_ndram;
-
-	/*
-	 * Whether this component is a valid destination for routing or
-	 * mapping rules -- in essence: can it have a FabricID?
-	 */
-	const boolean_t dc_invalid_dest;
-} df_comp_t;
-
-static df_comp_t milan_comps[] = {
-	{ 0, "UMC0", 2 },
-	{ 1, "UMC1", 2 },
-	{ 2, "UMC2", 2 },
-	{ 3, "UMC3", 2 },
-	{ 4, "UMC4", 2 },
-	{ 5, "UMC5", 2 },
-	{ 6, "UMC6", 2 },
-	{ 7, "UMC7", 2 },
-	{ 8, "CCIX0", 2 },
-	{ 9, "CCIX1", 2 },
-	{ 10, "CCIX2", 2 },
-	{ 11, "CCIX3", 2 },
-	{ 16, "CCM0", 16 },
-	{ 17, "CCM1", 16 },
-	{ 18, "CCM2", 16 },
-	{ 19, "CCM3", 16 },
-	{ 20, "CCM4", 16 },
-	{ 21, "CCM5", 16 },
-	{ 22, "CCM6", 16 },
-	{ 23, "CCM7", 16 },
-	{ 24, "IOMS0", 16 },
-	{ 25, "IOMS1", 16 },
-	{ 26, "IOMS2", 16 },
-	{ 27, "IOMS3", 16 },
-	{ 30, "PIE0", 8 },
-	{ 31, "CAKE0", 0, B_TRUE },
-	{ 32, "CAKE1", 0, B_TRUE },
-	{ 33, "CAKE2", 0, B_TRUE },
-	{ 34, "CAKE3", 0, B_TRUE },
-	{ 35, "CAKE4", 0, B_TRUE },
-	{ 36, "CAKE5", 0, B_TRUE },
-	{ 37, "TCDX0", 0, B_TRUE },
-	{ 38, "TCDX1", 0, B_TRUE },
-	{ 39, "TCDX2", 0, B_TRUE },
-	{ 40, "TCDX3", 0, B_TRUE },
-	{ 41, "TCDX4", 0, B_TRUE },
-	{ 42, "TCDX5", 0, B_TRUE },
-	{ 43, "TCDX6", 0, B_TRUE },
-	{ 44, "TCDX7", 0, B_TRUE },
-	{ 45, "TCDX8", 0, B_TRUE },
-	{ 46, "TCDX9", 0, B_TRUE },
-	{ 47, "TCDX10", 0, B_TRUE },
-	{ 48, "TCDX11", 0, B_TRUE }
-};
-
-static const char *milan_chan_ileaves[16] = {
-	"1", "2", "Reserved", "4",
-	"Reserved", "8", "6", "Reserved",
-	"Reserved", "Reserved", "Reserved", "Reserved",
-	"COD-4 2", "COD-2 4", "COD-1 8", "Reserved"
-};
 
 static df_ops_t df_ops_milan = {
 	.dfo_rev = DF_REV_3,
@@ -238,118 +55,7 @@ static df_ops_t df_ops_milan = {
 	.dfo_chan_ileaves_count = ARRAY_SIZE(milan_chan_ileaves),
 	.dfo_umc_count = ARRAY_SIZE(milan_chan_map),
 	.dfo_umc_chan_map = milan_chan_map,
-	.dfo_umc_order = (const uint8_t[]) { 0, 1, 3, 2, 6, 7, 5, 4 },
-};
-
-static df_comp_t genoa_comps[] = {
-	{ 0, "UMC0", 4 },
-	{ 1, "UMC1", 4 },
-	{ 2, "UMC2", 4 },
-	{ 3, "UMC3", 4 },
-	{ 4, "UMC4", 4 },
-	{ 5, "UMC5", 4 },
-	{ 6, "UMC6", 4 },
-	{ 7, "UMC7", 4 },
-	{ 8, "UMC8", 4 },
-	{ 9, "UMC9", 4 },
-	{ 10, "UMC10", 4 },
-	{ 11, "UMC11", 4 },
-	{ 12, "CMP0", 4 },
-	{ 13, "CMP1", 4 },
-	{ 14, "CMP2", 4 },
-	{ 15, "CMP3", 4 },
-	{ 16, "CCM0", 20 },
-	{ 17, "CCM1", 20 },
-	{ 18, "CCM2", 20 },
-	{ 19, "CCM3", 20 },
-	{ 20, "CCM4", 20 },
-	{ 21, "CCM5", 20 },
-	{ 22, "CCM6", 20 },
-	{ 23, "CCM7", 20 },
-	{ 24, "ACM0", 20 },
-	{ 25, "ACM1", 20 },
-	{ 26, "ACM2", 20 },
-	{ 27, "ACM3", 20 },
-	{ 28, "NCM0_IOMMU0", 20 },
-	{ 29, "NCM1_IOMMU1", 20 },
-	{ 30, "NCM2_IOMMU2", 20 },
-	{ 31, "NCM3_IOMMU3", 20 },
-	{ 32, "IOM0_IOHUBM0", 20 },
-	{ 33, "IOM1_IOHUBM1", 20 },
-	{ 34, "IOM2_IOHUBM2", 20 },
-	{ 35, "IOM3_IOHUBM3", 20 },
-	{ 36, "IOHUBS0", 1 },
-	{ 37, "IOHUBS1", 1 },
-	{ 38, "IOHUBS2", 1 },
-	{ 39, "IOHUBS3", 1 },
-	{ 40, "ICNG0" },
-	{ 41, "ICNG1" },
-	{ 42, "ICNG2" },
-	{ 43, "ICNG3" },
-	{ 44, "PIE0", 20 },
-	{ 45, "CAKE0", 0, B_TRUE },
-	{ 46, "CAKE1", 0, B_TRUE },
-	{ 47, "CAKE2", 0, B_TRUE },
-	{ 48, "CAKE3", 0, B_TRUE },
-	{ 49, "CAKE4", 0, B_TRUE },
-	{ 50, "CAKE5", 0, B_TRUE },
-	{ 51, "CAKE6", 0, B_TRUE },
-	{ 52, "CAKE7", 0, B_TRUE },
-	{ 53, "CNLI0", 0, B_TRUE },
-	{ 54, "CNLI1", 0, B_TRUE },
-	{ 55, "CNLI2", 0, B_TRUE },
-	{ 56, "CNLI3", 0, B_TRUE },
-	{ 57, "PFX0", 0, B_TRUE },
-	{ 58, "PFX1", 0, B_TRUE },
-	{ 59, "PFX2", 0, B_TRUE },
-	{ 60, "PFX3", 0, B_TRUE },
-	{ 61, "PFX4", 0, B_TRUE },
-	{ 62, "PFX5", 0, B_TRUE },
-	{ 63, "PFX6", 0, B_TRUE },
-	{ 64, "PFX7", 0, B_TRUE },
-	{ 65, "SPF0", 8, B_TRUE },
-	{ 66, "SPF1", 8, B_TRUE },
-	{ 67, "SPF2", 8, B_TRUE },
-	{ 68, "SPF3", 8, B_TRUE },
-	{ 69, "SPF4", 8, B_TRUE },
-	{ 70, "SPF5", 8, B_TRUE },
-	{ 71, "SPF6", 8, B_TRUE },
-	{ 72, "SPF7", 8, B_TRUE },
-	{ 73, "SPF8", 8, B_TRUE },
-	{ 74, "SPF9", 8, B_TRUE },
-	{ 75, "SPF10", 8, B_TRUE },
-	{ 76, "SPF11", 8, B_TRUE },
-	{ 77, "SPF12", 8, B_TRUE },
-	{ 78, "SPF13", 8, B_TRUE },
-	{ 79, "SPF14", 8, B_TRUE },
-	{ 80, "SPF15", 8, B_TRUE },
-	{ 81, "TCDX0", 0, B_TRUE },
-	{ 82, "TCDX1", 0, B_TRUE },
-	{ 83, "TCDX2", 0, B_TRUE },
-	{ 84, "TCDX3", 0, B_TRUE },
-	{ 85, "TCDX4", 0, B_TRUE },
-	{ 86, "TCDX5", 0, B_TRUE },
-	{ 87, "TCDX6", 0, B_TRUE },
-	{ 88, "TCDX7", 0, B_TRUE },
-	{ 89, "TCDX8", 0, B_TRUE },
-	{ 90, "TCDX9", 0, B_TRUE },
-	{ 91, "TCDX10", 0, B_TRUE },
-	{ 92, "TCDX11", 0, B_TRUE },
-	{ 93, "TCDX12", 0, B_TRUE },
-	{ 94, "TCDX13", 0, B_TRUE },
-	{ 95, "TCDX14", 0, B_TRUE },
-	{ 96, "TCDX15", 0, B_TRUE }
-};
-
-static const char *genoa_chan_ileaves[32] = {
-	"1", "2", "Reserved", "4",
-	"Reserved", "8", "Reserved", "16",
-	"32", "Reserved", "Reserved", "Reserved",
-	"Reserved", "Reserved", "Reserved", "Reserved",
-	"NPS-4 2", "NPS-2 4", "NPS-1 8", "NPS-4 3",
-	"NPS-2 6", "NPS-1 12", "NPS-2 5", "NPS-1 10",
-	"Reserved", "Reserved", "Reserved", "Reserved",
-	"Reserved", "Reserved", "Reserved", "Reserved",
+	.dfo_umc_order = milan_chan_umc_order,
 };
 
 static df_ops_t df_ops_genoa = {
@@ -367,18 +73,20 @@ static df_ops_t df_ops_genoa = {
 	.dfo_chan_ileaves_count = ARRAY_SIZE(genoa_chan_ileaves),
 	.dfo_umc_count = ARRAY_SIZE(genoa_chan_map),
 	.dfo_umc_chan_map = genoa_chan_map,
-	.dfo_umc_order =
-	    (const uint8_t[]) { 3, 4, 0, 5, 1, 2, 9, 10, 6, 11, 7, 8 },
+	.dfo_umc_order = genoa_chan_umc_order,
 };
 
-typedef struct mdb_oxide_board_cpuinfo {
-	x86_chiprev_t			obc_chiprev;
-} mdb_oxide_board_cpuinfo_t;
+/*
+ * Forward declarations.
+ */
+static boolean_t df_read32(uint64_t, const df_reg_def_t, uint32_t *);
+static boolean_t df_read32_indirect(uint64_t, uintptr_t, const df_reg_def_t,
+    uint32_t *);
 
-typedef struct mdb_oxide_board_data {
-	mdb_oxide_board_cpuinfo_t	obd_cpuinfo;
-} mdb_oxide_board_data_t;
-
+/*
+ * Grabs the effective ComponentIDs for each component instance in the DF and
+ * updates our ComponentID -> InstanceID mappings.
+ */
 static boolean_t
 df_discover_comp_ids(uint_t dfno)
 {

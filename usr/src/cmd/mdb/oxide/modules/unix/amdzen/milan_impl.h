@@ -13,23 +13,26 @@
  * Copyright 2024 Oxide Computer Company
  */
 
-#ifndef _ZEN_UMC_H
-#define	_ZEN_UMC_H
-
 /*
- * UMC data shared among other files.
+ * Milan DF and UMC data shared among other files.
  */
+
+#ifndef	_MILAN_IMPL_H
+#define	_MILAN_IMPL_H
+
+#include "../zen_kmdb_impl.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+extern const char *milan_chan_ileaves[16];
 extern const char *milan_chan_map[8];
-
-extern const char *genoa_chan_map[12];
+extern const uint8_t milan_chan_umc_order[8];
+extern df_comp_t milan_comps[43];
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* _ZEN_UMC_H */
+#endif /* _MILAN_IMPL_H */
