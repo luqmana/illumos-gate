@@ -75,50 +75,50 @@ typedef struct df_comp {
 /*
  * Fixed and dynamically discovered properties of the DF on the current system.
  */
-typedef struct df_ops {
+typedef struct df_props {
 	/*
 	 * The major DF revision -- determines register definitions we'll use.
 	 */
-	const df_rev_t dfo_rev;
+	const df_rev_t dfp_rev;
 
 	/*
 	 * The default instance to use for DRAM & I/O ports when not specified.
 	 */
-	const uintptr_t dfo_dram_io_inst;
+	const uintptr_t dfp_dram_io_inst;
 
 	/*
 	 * The default instance to use for MMIO & PCI buses when not specified.
 	 */
-	const uintptr_t dfo_mmio_pci_inst;
+	const uintptr_t dfp_mmio_pci_inst;
 
 	/*
 	 * The list of components that we know about on this system.
 	 */
-	const df_comp_t *dfo_comps;
-	const size_t dfo_comps_count;
+	const df_comp_t *dfp_comps;
+	const size_t dfp_comps_count;
 
 	/*
 	 * Mapping of channel interleave values to human-readable names.
 	 */
-	const char **dfo_chan_ileaves;
-	const size_t dfo_chan_ileaves_count;
+	const char **dfp_chan_ileaves;
+	const size_t dfp_chan_ileaves_count;
 
 	/*
 	 * The number of UMC instances on this system.
 	 */
-	const size_t dfo_umc_count;
+	const size_t dfp_umc_count;
 	/*
 	 * Mapping of UMC instance to channel name.
 	 */
-	const char **dfo_umc_chan_map;
+	const char **dfp_umc_chan_map;
 	/*
 	 * Order to iterate through UMC instances in output (board order).
 	 */
-	const uint8_t *dfo_umc_order;
+	const uint8_t *dfp_umc_order;
 
 	/*
 	 * The rest of the fields are dynamically discovered and cached
-	 * in df_ops_init().
+	 * in df_props_init().
 	 */
 
 	/*
@@ -135,20 +135,20 @@ typedef struct df_ops {
 	 * Besides disabled components, some are also just never valid mapping
 	 * or routing targets (e.g. TCDXs, CAKEs).
 	 */
-	uint8_t dfo_comp_map[MAX_IO_DIES][MAX_COMPS];
+	uint8_t dfp_comp_map[MAX_IO_DIES][MAX_COMPS];
 
 	/*
 	 * Mask to extract the ComponentID from a FabricID.
 	 */
-	uint32_t dfo_comp_mask;
+	uint32_t dfp_comp_mask;
 	/*
 	 * Mask to extract the NodeID from a FabricID.
 	 */
-	uint32_t dfo_node_mask;
+	uint32_t dfp_node_mask;
 	/*
 	 * Shift to extract the NodeID from a FabricID.
 	 */
-	uint32_t dfo_node_shift;
-} df_ops_t;
+	uint32_t dfp_node_shift;
+} df_props_t;
 
 #endif /* _ZEN_KMDB_IMPL_H */
