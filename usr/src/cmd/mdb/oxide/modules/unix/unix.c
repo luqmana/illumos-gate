@@ -1065,6 +1065,12 @@ static const mdb_modinfo_t modinfo = { MDB_API_VERSION, dcmds, walkers };
 const mdb_modinfo_t *
 _mdb_init(void)
 {
+#ifdef _KMDB
+	if (!df_props_init()) {
+		mdb_warn("failed to initialize df properties\n");
+		return (NULL);
+	}
+#endif
 	return (&modinfo);
 }
 

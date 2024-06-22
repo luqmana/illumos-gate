@@ -32,8 +32,9 @@
 #include <sys/apob_impl.h>
 #include <milan_apob.h>
 
-#include "amdzen/milan_impl.h"
 #include "apob_mod.h"
+
+extern const char *milan_chan_map[8];
 
 typedef struct mdb_apob_apob_hdl {
 	uintptr_t ah_header;

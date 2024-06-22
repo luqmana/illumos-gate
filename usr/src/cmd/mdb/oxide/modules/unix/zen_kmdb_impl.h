@@ -19,6 +19,7 @@
 #include <sys/types.h>
 #include <sys/x86_archext.h>
 #include <sys/amdzen/df.h>
+#include <io/amdzen/amdzen_client.h>
 
 /*
  * We don't really know how many I/O dies there are in advance;
@@ -82,6 +83,16 @@ typedef struct df_props {
 	const df_rev_t dfp_rev;
 
 	/*
+	 * Mask for valid registers for use with ::rddf/::wrdf dcmds.
+	 */
+	const uintptr_t dfp_reg_mask;
+
+	/*
+	 * The maximum number of PCI Bus configuration address maps. 
+	 */
+	const uint_t dfp_max_cfgmap;
+
+	/*
 	 * The default instance to use for DRAM & I/O ports when not specified.
 	 */
 	const uintptr_t dfp_dram_io_inst;
@@ -138,17 +149,12 @@ typedef struct df_props {
 	uint8_t dfp_comp_map[MAX_IO_DIES][MAX_COMPS];
 
 	/*
-	 * Mask to extract the ComponentID from a FabricID.
+	 * The information necessary to (de)composing Fabric/Node/Component IDs.
 	 */
-	uint32_t dfp_comp_mask;
-	/*
-	 * Mask to extract the NodeID from a FabricID.
-	 */
-	uint32_t dfp_node_mask;
-	/*
-	 * Shift to extract the NodeID from a FabricID.
-	 */
-	uint32_t dfp_node_shift;
+	df_fabric_decomp_t dfp_decomp;
 } df_props_t;
+
+extern df_props_t df_props_genoa;
+extern df_props_t df_props_milan;
 
 #endif /* _ZEN_KMDB_IMPL_H */
