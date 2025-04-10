@@ -26,7 +26,7 @@
  * Copyright 2012 Nexenta Systems, Inc. All rights reserved.
  * Copyright (c) 2018, Joyent, Inc.
  * Copyright 2021 OmniOS Community Edition (OmniOSce) Association.
- * Copyright 2024 Oxide Computer Company
+ * Copyright 2025 Oxide Computer Company
  */
 
 #include <sys/stdbool.h>
@@ -331,7 +331,31 @@ ucode_locate_amd(cpu_t *cp, cpu_ucode_info_t *uinfop)
 		    ucode_path(), cpuid_getvendorstr(cp), eq_sig, i);
 		if ((fd = kobj_open(name)) == -1)
 			return (EM_NOMATCH);
+
+		bzero(ucodefp, sizeof (*ucodefp));
 		count = kobj_read(fd, (char *)ucodefp, sizeof (*ucodefp), 0);
+		if (count < 0) {
+			(void) kobj_close(fd);
+			cmn_err(CE_WARN,
+			    "ucode: failed to read microcode file %s", name);
+			continue;
+		} else if (count == sizeof (*ucodefp)) {
+			/*
+			 * The maximum patch size we support is hardcoded
+			 * (UCODE_AMD_MAX_PATCH_SIZE) and in practice any
+			 * individual patch would be smaller, so a full read
+			 * here is suspect.
+			 */
+			char b;
+			if (kobj_read(fd, &b, sizeof (b), count) ==
+			    sizeof (b)) {
+				cmn_err(CE_WARN,
+				    "ucode: microcode file %s is too large",
+				    name);
+				(void) kobj_close(fd);
+				continue;
+			}
+		}
 		(void) kobj_close(fd);
 
 		if (ucode_match_amd(eq_sig, uinfop, ucodefp, count) == EM_OK) {

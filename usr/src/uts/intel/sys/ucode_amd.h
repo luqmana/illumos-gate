@@ -54,18 +54,25 @@ typedef struct ucode_header_amd {
 	uint32_t uh_match[8];
 } ucode_header_amd_t;
 
+/*
+ * We currently only support microcode patches of at most 16KiB (16384 bytes).
+ */
+#define	UCODE_AMD_MAX_PATCH_SIZE	(16384)
+#define	UCODE_AMD_PAD_SIZE \
+	(UCODE_AMD_MAX_PATCH_SIZE - sizeof (ucode_header_amd_t))
+
 typedef struct ucode_file_amd {
-	/*
-	 * The combined size of these fields adds up to 16KiB (16384 bytes).
-	 * If support is needed for larger update files, increase the size of
-	 * the uf_encr element.
-	 */
 	ucode_header_amd_t uf_header;
-	uint8_t uf_data[896];
-	uint8_t uf_resv[896];
-	uint8_t uf_code_present;
-	uint8_t uf_code[191];
-	uint8_t uf_encr[14336];
+	union {
+		struct {
+			uint8_t uf_data[896];
+			uint8_t uf_resv[896];
+			uint8_t uf_code_present;
+			uint8_t uf_code[191];
+			uint8_t uf_encr[];
+		};
+		uint8_t uf_pad[UCODE_AMD_PAD_SIZE];
+	};
 } ucode_file_amd_t;
 
 typedef struct ucode_eqtbl_amd {
