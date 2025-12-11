@@ -430,11 +430,11 @@ turin_fabric_smu_pptable_init(zen_fabric_t *fabric, void *pptable, size_t *len)
 
 	switch (family) {
 	case X86_PF_AMD_TURIN:
-		if (maj != 94 || min < 91 || min > 125)
+		if (maj != 94 || min < 91 || min > 129)
 			valid = false;
 		break;
 	case X86_PF_AMD_DENSE_TURIN:
-		if (maj != 99 || min < 91 || min > 125)
+		if (maj != 99 || min < 91 || min > 129)
 			valid = false;
 		break;
 	default:
@@ -457,6 +457,13 @@ turin_fabric_smu_pptable_init(zen_fabric_t *fabric, void *pptable, size_t *len)
 	 * Explicitly disable the overclocking part of the table.
 	 */
 	tpp->tpp_overclock.tppo_oc_dis = 1;
+
+	/*
+	 * Turin PI 1.0.0.8 (SMU minor version 129/0x81) flipped this to default
+	 * to 1.
+	 */
+	if (min >= 129)
+		tpp->tpp_cclk_mode = 1;
 
 	/*
 	 * Set platform-specific power and current limits.
