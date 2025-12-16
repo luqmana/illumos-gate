@@ -113,6 +113,8 @@ typedef struct ipcc_keyset {
 #define	IPCC_KEY_INVENTORY		2
 #define	IPCC_KEY_ETC_SYSTEM		3
 #define	IPCC_KEY_DTRACE_CONF		4
+/* Temporary key overload for PCIe investigation. */
+#define	IPCC_KEY_PCIE_PORT_LC_PRST_MASK_GEN5	IPCC_KEY_INSTALLINATOR_IMAGE_ID
 
 typedef struct ipcc_imageblock {
 	uint8_t		ii_hash[IPCC_IMAGE_HASHLEN];

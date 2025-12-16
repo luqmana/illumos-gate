@@ -53,6 +53,16 @@
 #include <sys/io/turin/ioapic.h>
 #include <sys/io/turin/pptable.h>
 
+#include <sys/ipcc.h>
+#include <sys/kernel_ipcc.h>
+
+/*
+ * Temporary global for PCIe Port Link Controller Preset mask for Gen5.
+ * Overridable via IPCC key IPCC_KEY_PCIE_PORT_LC_PRST_MASK_GEN5.
+ */
+static uint16_t turin_pcie_port_lc_prst_mask_gen5 =
+    PCIE_PORT_LC_PRST_MASK_CTL_32GT_VAL;
+
 /*
  * Various routines and things to access, initialize, understand, and manage
  * Turin's I/O fabric. This consists of both the data fabric and the
@@ -1937,6 +1947,31 @@ turin_fabric_hotplug_start(zen_iodie_t *iodie)
 void
 turin_fabric_pcie(zen_fabric_t *fabric)
 {
+	uint16_t prst_mask = 0;
+	size_t bufl = sizeof (prst_mask);
+	int ret;
+
+	/*
+	 * Grab the PCIe Port Link Controller Preset mask for Gen5 via IPCC
+	 * (if available).
+	 */
+	ret = kernel_ipcc_keylookup(IPCC_KEY_PCIE_PORT_LC_PRST_MASK_GEN5,
+	    (uint8_t *)&prst_mask, &bufl);
+	if (ret == 0) {
+		if (bufl != sizeof (uint16_t)) {
+			cmn_err(CE_WARN, "unexpected size (%zu) for PCIe Port "
+			    "LC Preset Mask via IPCC, using default", bufl);
+		} else if (prst_mask > 0x3ff) {
+			cmn_err(CE_WARN, "invalid value (0x%x) for PCIe Port LC"
+			    " Preset Mask via IPCC, using default", prst_mask);
+		} else {
+			turin_pcie_port_lc_prst_mask_gen5 = prst_mask;
+		}
+	} else if (ret != ENOENT) {
+		cmn_err(CE_WARN, "unexpected error (%d) looking up PCIe Port LC"
+		    " Preset Mask via IPCC, using default", ret);
+	}
+
 	zen_mpio_pcie_init(fabric);
 }
 
@@ -2652,8 +2687,9 @@ turin_fabric_init_pcie_port_after_reconfig(zen_pcie_port_t *port)
 	    PCIE_PORT_LC_PRST_MASK_CTL_8GT_VAL);
 	val = PCIE_PORT_LC_PRST_MASK_CTL_SET_MASK_16GT(val,
 	    PCIE_PORT_LC_PRST_MASK_CTL_16GT_VAL);
+	VERIFY3U(turin_pcie_port_lc_prst_mask_gen5, <=, 0x3ff);
 	val = PCIE_PORT_LC_PRST_MASK_CTL_SET_MASK_32GT(val,
-	    PCIE_PORT_LC_PRST_MASK_CTL_32GT_VAL);
+	    turin_pcie_port_lc_prst_mask_gen5);
 	zen_pcie_port_write(port, reg, val);
 
 	/*

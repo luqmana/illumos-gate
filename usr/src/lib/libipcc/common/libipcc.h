@@ -163,6 +163,9 @@ extern void libipcc_mac_free(libipcc_mac_t *);
 #define	LIBIPCC_KEY_INVENTORY			IPCC_KEY_INVENTORY
 #define	LIBIPCC_KEY_ETC_SYSTEM			IPCC_KEY_ETC_SYSTEM
 #define	LIBIPCC_KEY_DTRACE_CONF			IPCC_KEY_DTRACE_CONF
+/* Temporary key overload for PCIe investigation. */
+#define	LIBIPCC_KEY_PCIE_PORT_LC_PRST_MASK_GEN5	\
+	IPCC_KEY_PCIE_PORT_LC_PRST_MASK_GEN5
 
 typedef enum {
 	/*
