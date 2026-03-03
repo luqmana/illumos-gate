@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef _SYS_IO_TURIN_PPTABLE_H
@@ -156,6 +156,7 @@ typedef struct turin_pptable_cff {
  * +------------------+---------------------------------+------------+
  * | tpp_cclk_mode    | 0x5e.0x7d.0x00 / 0x63.0x7d.0x00 | 1.0.0.7    |
  * | tpp_adjust_gb    | 0x5e.0x81.0x00 / 0x63.0x81.0x00 | 1.0.0.8    |
+ * | tpp_one_cppc_max | 0x5e.0x83.0x00 / 0x63.0x83.0x00 | 1.0.0.a    |
  * +------------------+---------------------------------+------------+
  */
 typedef struct turin_pptable_v94_91 {
@@ -180,9 +181,10 @@ typedef struct turin_pptable_v94_91 {
 	uint8_t					tpp_xgmi_min_width;
 	uint8_t					tpp_rsvd1[3];
 
-	uint8_t					tpp_cclk_mode; /* >= 1.0.0.7 */
-	uint8_t					tpp_adjust_gb; /* >= 1.0.0.8 */
-	uint8_t					tpp_rsvd2[30];
+	uint8_t					tpp_cclk_mode;
+	uint8_t					tpp_adjust_gb;
+	uint8_t					tpp_one_cppc_max;
+	uint8_t					tpp_rsvd2[29];
 } turin_pptable_v94_91_t;
 
 CTASSERT(sizeof (turin_pptable_v94_91_t) == 0x90);
@@ -205,7 +207,7 @@ CTASSERT(offsetof(turin_pptable_v94_91_t, tpp_xgmi_pstate_range_max) == 0x6a);
 CTASSERT(offsetof(turin_pptable_v94_91_t, tpp_xgmi_pstate_range_spare) == 0x6b);
 CTASSERT(offsetof(turin_pptable_v94_91_t, tpp_xgmi_min_width) == 0x6c);
 CTASSERT(offsetof(turin_pptable_v94_91_t, tpp_rsvd1) == 0x6d);
-CTASSERT(offsetof(turin_pptable_v94_91_t, tpp_rsvd2) == 0x72);
+CTASSERT(offsetof(turin_pptable_v94_91_t, tpp_rsvd2) == 0x73);
 
 #pragma pack()  /* pragma pack(4) */
 
