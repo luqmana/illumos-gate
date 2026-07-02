@@ -94,6 +94,11 @@ extern bool zen_smu_rpc_give_address(zen_iodie_t *, uint64_t);
 extern bool zen_smu_rpc_send_pptable(zen_iodie_t *, zen_pptable_t *);
 
 /*
+ * Provides the SMU with the address of a buffer to be used for tools.
+ */
+extern bool zen_smu_rpc_tools_address(zen_iodie_t *, uint64_t);
+
+/*
  * Sets SMU features.
  */
 extern bool zen_smu_set_features(zen_iodie_t *, uint32_t, uint32_t);

@@ -324,6 +324,29 @@ zen_smu_rpc_send_pptable(zen_iodie_t *iodie, zen_pptable_t *pptable)
 }
 
 bool
+zen_smu_rpc_tools_address(zen_iodie_t *iodie, uint64_t addr)
+{
+	zen_smu_rpc_t rpc = { 0 };
+	zen_smu_rpc_res_t res;
+
+	rpc.zsr_req = ZEN_SMU_OP_TOOLS_ADDRESS;
+	rpc.zsr_args[0] = bitx64(addr, 31, 0);
+	rpc.zsr_args[1] = bitx64(addr, 63, 32);
+
+	res = zen_smu_rpc(iodie, &rpc);
+	if (res != ZEN_SMU_RPC_OK) {
+		cmn_err(CE_WARN, "Socket %u IO die: %u: "
+		    "SMU Set Tools Address RPC Failed: "
+		    "addr: 0x%lx, SMU req 0x%x resp %s (SMU 0x%x)",
+		    iodie->zi_soc->zs_num, iodie->zi_num, addr, rpc.zsr_req,
+		    zen_smu_rpc_res_str(res), rpc.zsr_resp);
+		return (false);
+	}
+
+	return (true);
+}
+
+bool
 zen_smu_set_features(zen_iodie_t *iodie, uint32_t features,
     uint32_t features_ext)
 {

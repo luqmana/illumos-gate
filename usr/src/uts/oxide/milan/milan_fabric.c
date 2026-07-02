@@ -1788,7 +1788,8 @@ milan_smu_features_init(zen_iodie_t *iodie)
 	    MILAN_SMU_FEATURE_CLOCK_GATING |
 	    MILAN_SMU_FEATURE_DYNAMIC_LDO_DROPOUT_LIMITER |
 	    MILAN_SMU_FEATURE_DYNAMIC_VID_OPTIMIZER |
-	    MILAN_SMU_FEATURE_AGE;
+	    MILAN_SMU_FEATURE_AGE |
+	    MILAN_SMU_FEATURE_DIAGNOSTIC_MODE;
 
 	return (zen_smu_set_features(iodie, features, 0));
 }

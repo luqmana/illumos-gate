@@ -375,6 +375,8 @@ struct zen_fabric {
 	 */
 	zen_pptable_t		zf_pptable;
 
+	zen_pptable_t		zf_tools_buf;
+
 	/*
 	 * Global hotplug information. Note, UBM based information is only used
 	 * on MPIO based platforms (e.g. Genoa and newer).

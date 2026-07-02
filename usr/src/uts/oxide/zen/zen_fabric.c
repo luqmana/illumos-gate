@@ -30,6 +30,9 @@
 #include <sys/platform_detect.h>
 #include <sys/boot_data.h>
 
+#include <vm/hat.h>
+#include <vm/hat_i86.h>
+
 #include <io/amdzen/amdzen.h>
 #include <sys/amdzen/df.h>
 #include <sys/amdzen/ccd.h>
@@ -2591,6 +2594,36 @@ zen_fabric_init_pptable(zen_fabric_t *fabric)
 }
 
 static int
+zen_fabric_set_tools_address(zen_iodie_t *iodie, void *arg __unused)
+{
+	zen_pptable_t *tools = &iodie->zi_soc->zs_fabric->zf_tools_buf;
+	ddi_dma_attr_t attr;
+	caddr_t cached, uncached;
+	pfn_t pfn;
+
+	zen_fabric_dma_attr(&attr);
+	tools->zpp_alloc_len = tools->zpp_size = 4 * MMU_PAGESIZE;
+
+	cached = contig_alloc(tools->zpp_alloc_len, &attr, MMU_PAGESIZE, 1);
+	pfn = hat_getpfnum(kas.a_hat, cached);
+	tools->zpp_pa = mmu_ptob((uint64_t)pfn);
+
+	uncached = device_arena_alloc(tools->zpp_alloc_len, VM_SLEEP);
+	hat_devload(kas.a_hat, uncached, tools->zpp_alloc_len, pfn,
+	    PROT_READ | PROT_WRITE | HAT_PLAT_NOCACHE, HAT_LOAD_NOCONSIST);
+	tools->zpp_table = uncached;
+	bzero(tools->zpp_table, tools->zpp_alloc_len);
+
+	if (zen_smu_rpc_tools_address(iodie, tools->zpp_pa)) {
+		cmn_err(CE_CONT, "?IO die %u: Set Tools Address "
+		    "(PA 0x%lx uncached VA %p)\n",
+		    iodie->zi_num, tools->zpp_pa, (void *)tools->zpp_table);
+	}
+
+	return (0);
+}
+
+static int
 zen_fabric_enable_hsmp_int(zen_iodie_t *iodie, void *arg __unused)
 {
 	if (zen_smu_rpc_enable_hsmp_int(iodie)) {
@@ -2604,6 +2637,7 @@ zen_fabric_enable_hsmp_int(zen_iodie_t *iodie, void *arg __unused)
 static void
 zen_fabric_init_smu(zen_fabric_t *fabric)
 {
+	(void) zen_fabric_walk_iodie(fabric, zen_fabric_set_tools_address, NULL);
 	(void) zen_fabric_walk_iodie(fabric, zen_fabric_enable_hsmp_int, NULL);
 }
 
