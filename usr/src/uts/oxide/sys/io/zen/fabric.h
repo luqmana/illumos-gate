@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef	_SYS_IO_ZEN_FABRIC_H
@@ -108,6 +108,11 @@ extern zen_ioms_flag_t zen_ioms_flags(const zen_ioms_t *const);
  * Returns a pointer to the IO die the given IOMS is connected to.
  */
 extern zen_iodie_t *zen_ioms_iodie(const zen_ioms_t *const);
+
+/*
+ * Returns the PCI bus number of the root complex hosted by the given IOMS.
+ */
+extern uint16_t zen_ioms_pci_busno(const zen_ioms_t *const);
 
 /*
  * Returns the node ID associated corresponding to this die.

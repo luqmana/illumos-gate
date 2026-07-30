@@ -686,6 +686,15 @@ zen_ioms_iodie(const zen_ioms_t *const ioms)
 }
 
 /*
+ * Returns the PCI bus number of the root complex hosted by this IOMS.
+ */
+uint16_t
+zen_ioms_pci_busno(const zen_ioms_t *const ioms)
+{
+	return (ioms->zio_pci_busno);
+}
+
+/*
  * Returns the flags that have been set on this IO die.
  */
 zen_iodie_flag_t

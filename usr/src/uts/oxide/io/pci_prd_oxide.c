@@ -178,13 +178,35 @@ pci_prd_fini(void)
 
 }
 
+typedef struct pci_prd_rc_iter {
+	pci_prd_root_complex_f	pri_func;
+	void			*pri_arg;
+} pci_prd_rc_iter_t;
+
+static int
+pci_prd_rc_iter_cb(zen_ioms_t *ioms, void *arg)
+{
+	pci_prd_rc_iter_t *iter = arg;
+
+	if (!iter->pri_func(zen_ioms_pci_busno(ioms), iter->pri_arg))
+		return (1);
+
+	return (0);
+}
+
 /*
- * XXX we should probably implement these soon. Punting for the moment.
+ * Every IOMS in the fabric hosts an IOHC that acts as a PCIe root complex
+ * with its own root bus whose bus number we report here.
  */
 void
 pci_prd_root_complex_iter(pci_prd_root_complex_f func, void *arg)
 {
+	pci_prd_rc_iter_t iter = {
+		.pri_func = func,
+		.pri_arg = arg,
+	};
 
+	(void) zen_walk_ioms(pci_prd_rc_iter_cb, &iter);
 }
 
 /*
