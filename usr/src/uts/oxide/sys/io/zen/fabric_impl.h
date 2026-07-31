@@ -400,7 +400,6 @@ struct zen_fabric {
 	zen_soc_t		zf_socs[ZEN_FABRIC_MAX_SOCS];
 };
 
-typedef int (*zen_iodie_cb_f)(zen_iodie_t *, void *);
 typedef int (*zen_nbio_cb_f)(zen_nbio_t *, void *);
 
 extern int zen_fabric_walk_ioms(zen_fabric_t *, zen_ioms_cb_f, void *);

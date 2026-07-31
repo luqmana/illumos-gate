@@ -1899,51 +1899,16 @@ int	apic_multi_msi_enable = 1;
 /*
  * Check whether the system supports MSI.
  *
- * MSI is required for PCI-E and for PCI versions later than 2.2, so if we find
- * a PCI-E bus or we find a PCI bus whose version we know is >= 2.2, then we
- * return PSM_SUCCESS to indicate this system supports MSI.
- *
- * (Currently the only way we check whether a given PCI bus supports >= 2.2 is
- * by detecting if we are running inside the KVM hypervisor, which guarantees
- * this version number.)
+ * On the Oxide architecture there is nothing to check: every supported
+ * processor is PCIe-only and MSI/MSI-X is the only supported mechanism for
+ * PCIe interrupts (no legacy INTx emulation).  We also do not want to encode
+ * any assumption about where in the devinfo tree the PCIe root complexes live
+ * unlike the i86pc implementation.
  */
 int
 apic_check_msi_support(void)
 {
-	dev_info_t *cdip;
-	char dev_type[16];
-	int dev_len;
-	int hwenv = get_hwenv();
-
-	DDI_INTR_IMPLDBG((CE_CONT, "apic_check_msi_support:\n"));
-
-	/*
-	 * check whether the first level children of root_node have
-	 * PCI-E or PCI capability.
-	 */
-	for (cdip = ddi_get_child(ddi_root_node()); cdip != NULL;
-	    cdip = ddi_get_next_sibling(cdip)) {
-
-		DDI_INTR_IMPLDBG((CE_CONT, "apic_check_msi_support: cdip: 0x%p,"
-		    " driver: %s, binding: %s, nodename: %s\n", (void *)cdip,
-		    ddi_driver_name(cdip), ddi_binding_name(cdip),
-		    ddi_node_name(cdip)));
-		dev_len = sizeof (dev_type);
-		if (ddi_getlongprop_buf(DDI_DEV_T_ANY, cdip, DDI_PROP_DONTPASS,
-		    "device_type", (caddr_t)dev_type, &dev_len)
-		    != DDI_PROP_SUCCESS)
-			continue;
-		if (strcmp(dev_type, "pciex") == 0)
-			return (PSM_SUCCESS);
-		if (strcmp(dev_type, "pci") == 0 &&
-		    (hwenv == HW_KVM || hwenv == HW_BHYVE))
-			return (PSM_SUCCESS);
-	}
-
-	/* MSI is not supported on this system */
-	DDI_INTR_IMPLDBG((CE_CONT, "apic_check_msi_support: no 'pciex' "
-	    "device_type found\n"));
-	return (PSM_FAILURE);
+	return (PSM_SUCCESS);
 }
 
 /*

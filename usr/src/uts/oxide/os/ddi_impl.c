@@ -172,6 +172,7 @@ configure(void)
 {
 	extern void i_ddi_init_root();
 	extern int fpu_ignored;
+	major_t major;
 
 	/*
 	 * Determine if an FPU is attached
@@ -202,6 +203,17 @@ configure(void)
 	 * the initial resource allocations for PCI devices.
 	 */
 	impl_bus_reprobe();
+
+	/*
+	 * Create and attach the fabric nexi: the df nodes (via rootnex's
+	 * bus_config).  We must take care not to use NDI_CONFIG here which
+	 * would pull in interrupt-using leaf drivers before we have the PSM
+	 * installed.
+	 */
+	major = ddi_name_to_major("df");
+	ASSERT3U(major, !=, DDI_MAJOR_T_NONE);
+	(void) ndi_devi_config_driver(ddi_root_node(), NDI_ONLINE_ATTACH,
+	    major);
 
 	/*
 	 * Setup but don't startup the IOMMU
@@ -600,6 +612,8 @@ make_ddi_ppd(dev_info_t *child, struct ddi_parent_private_data **ppd)
 static int
 impl_sunbus_name_child(dev_info_t *child, char *name, int namelen)
 {
+	char *ua;
+
 	/*
 	 * Fill in parent-private data and this function returns to us
 	 * an indication if it used "registers" to fill in the data.
@@ -608,6 +622,21 @@ impl_sunbus_name_child(dev_info_t *child, char *name, int namelen)
 		struct ddi_parent_private_data *pdptr;
 		make_ddi_ppd(child, &pdptr);
 		ddi_set_parent_data(child, pdptr);
+	}
+
+	/*
+	 * A child with an explicit "unit-address" string property is named
+	 * from that directly, following the convention established for
+	 * driver.conf(5) children (see e.g. pci_common_name_child()).  This
+	 * allows fabric-enumerated children of the root nexus to be named
+	 * without fabricating a legacy sun4-style "reg" property whose only
+	 * consumer would be the naming code below.
+	 */
+	if (ddi_prop_lookup_string(DDI_DEV_T_ANY, child, DDI_PROP_DONTPASS,
+	    "unit-address", &ua) == DDI_PROP_SUCCESS) {
+		(void) snprintf(name, namelen, "%s", ua);
+		ddi_prop_free(ua);
+		return (DDI_SUCCESS);
 	}
 
 	name[0] = '\0';
@@ -2181,17 +2210,16 @@ impl_bus_initialprobe(void)
 	struct bus_probe *probe;
 
 	/*
-	 * XXX It seems like this really ought to be done by a parent's
-	 * (probably either an IOMS or an IO die) bus_config op, but it doesn't
-	 * have one on this or any other platform and everything it seems like
-	 * it ought to do is instead done by a collection of hacks.  This needs
-	 * to be revisited, not only here but for everyone: we really should be
-	 * able to have configure() simply call ndi_devi_online(rootnex) or
-	 * similar and put all these "bus probes" into the platform-specific
-	 * parent nexus drivers instead.  Does this exist to solve some chicken
-	 * and egg problem?  Is it historical?  Note that even sun4u's rootnex
-	 * doesn't have a bus_config op, so it can't just be about not having a
-	 * full devinfo tree at this point.
+	 * XXX What remains of this mechanism ought to go away as well.  The
+	 * df and ioms nexi are already created by their parents' bus_config
+	 * ops (rootnex's and df's, respectively, driven from configure()),
+	 * which is the model everything here should follow: the fch probe
+	 * belongs in ioms's bus_config, as does the PCI enumeration, at which
+	 * point this function, the probe list, and these modloads can all be
+	 * deleted.  There is no chicken-and-egg reason for any of this to
+	 * happen before configure() -- nothing consumes the nodes these
+	 * probes create until well after that -- the mechanism is simply
+	 * inherited from i86pc.
 	 */
 	if (modload("drv", "fch") < 0) {
 		panic("failed to load drv/fch");

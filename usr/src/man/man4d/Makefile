@@ -190,12 +190,14 @@ i386_MANFILES=	ahci.4d		\
 		cmdk.4d		\
 		coretemp.4d	\
 		cpqary3.4d	\
+		df.4d		\
 		dnet.4d		\
 		ecpp.4d		\
 		elxl.4d		\
 		i40e.4d		\
 		imc.4d		\
 		imcstub.4d	\
+		ioms.4d		\
 		ipmi.4d		\
 		iprb.4d		\
 		ipw.4d		\

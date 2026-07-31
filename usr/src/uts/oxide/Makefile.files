@@ -208,6 +208,10 @@ AMDZEN_PLAT_OBJS += amdzen_plat_oxide.o
 
 FCH_OBJS += fch.o ixbar.o
 
+DF_OBJS += df.o
+
+IOMS_OBJS += ioms.o
+
 DWU_OBJS += asy.o
 
 BOOT_IMAGE_OBJS += oxide_boot.o oxide_boot_disk.o oxide_boot_net.o \

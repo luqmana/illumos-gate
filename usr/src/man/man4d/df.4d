@@ -1,0 +1,45 @@
+.\"
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
+.\"
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" http://www.illumos.org/license/CDDL.
+.\"
+.\"
+.\" Copyright 2026 Oxide Computer Company
+.\"
+.Dd July 30, 2026
+.Dt DF 4D
+.Os
+.Sh NAME
+.Nm df
+.Nd AMD Zen data fabric nexus driver
+.Sh SYNOPSIS
+.Pa /devices/df@*
+.Sh DESCRIPTION
+The
+.Nm
+driver represents each data fabric
+.Pq DF
+instance in the AMD Zen family processors used by the Oxide architecture.
+Every I/O die implements a DF instance: the crossbar connecting its compute
+complexes, memory controllers, and I/O subsystem to one another and, via
+inter-socket links, to the fabrics of other sockets.
+On all currently supported processors there is one I/O die, and therefore
+one instance of
+.Nm ,
+per socket.
+.Pp
+Each device node's unit address is the fabric node ID of the DF instance it
+represents, which is also available as the
+.Sy node-id
+property.
+The nodes representing the I/O units attached to each die's fabric are
+enumerated as children of the corresponding
+.Nm
+node.
+.Sh SEE ALSO
+.Xr ioms 4D

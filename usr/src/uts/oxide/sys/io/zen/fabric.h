@@ -72,6 +72,13 @@ typedef enum zen_ioms_rsrc {
 typedef int (*zen_ioms_cb_f)(zen_ioms_t *, void *);
 extern int zen_walk_ioms(zen_ioms_cb_f, void *);
 
+/*
+ * Walks IO dies and applies a callback, in the same manner as
+ * zen_walk_ioms().
+ */
+typedef int (*zen_iodie_cb_f)(zen_iodie_t *, void *);
+extern int zen_walk_iodie(zen_iodie_cb_f, void *);
+
 typedef enum zen_ioms_flag {
 	ZEN_IOMS_F_HAS_FCH	= 1 << 0,
 	ZEN_IOMS_F_HAS_BONUS	= 1 << 1,
@@ -115,9 +122,44 @@ extern zen_iodie_t *zen_ioms_iodie(const zen_ioms_t *const);
 extern uint16_t zen_ioms_pci_busno(const zen_ioms_t *const);
 
 /*
- * Returns the node ID associated corresponding to this die.
+ * Returns the index of the given IOMS relative to its IO die.
  */
-extern uint8_t zen_iodie_node_id(const zen_iodie_t *const);
+extern uint8_t zen_ioms_num(const zen_ioms_t *const);
+
+/*
+ * Returns the index of the IOHC associated with the given IOMS.
+ */
+extern uint8_t zen_ioms_iohc_num(const zen_ioms_t *const);
+
+/*
+ * Returns the IOHUB number of the given IOMS relative to its containing NBIO.
+ */
+extern uint8_t zen_ioms_iohub_num(const zen_ioms_t *const);
+
+/*
+ * Returns the type of IOHC associated with the given IOMS.
+ */
+extern zen_iohc_type_t zen_ioms_iohc_type(const zen_ioms_t *const);
+
+/*
+ * Returns the FabricID of the given IOMS.
+ */
+extern uint16_t zen_ioms_fabric_id(const zen_ioms_t *const);
+
+/*
+ * Returns a pointer to the NBIO the given IOMS is connected to.
+ */
+extern zen_nbio_t *zen_ioms_nbio(const zen_ioms_t *const);
+
+/*
+ * Returns the index of the given NBIO relative to its IO die.
+ */
+extern uint8_t zen_nbio_num(const zen_nbio_t *const);
+
+/*
+ * Returns the node ID corresponding to the given die.
+ */
+extern uint16_t zen_iodie_node_id(const zen_iodie_t *const);
 
 /*
  * Returns the set of flags set on the given IO die.

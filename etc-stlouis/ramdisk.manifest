@@ -770,8 +770,10 @@ d platform/oxide/kernel/drv 0755 root sys
 d platform/oxide/kernel/drv/amd64 0755 root sys
 f platform/oxide/kernel/drv/amd64/apob 0755 root sys
 f platform/oxide/kernel/drv/amd64/cpc 0755 root sys
+f platform/oxide/kernel/drv/amd64/df 0755 root sys
 f platform/oxide/kernel/drv/amd64/dwu 0755 root sys
 f platform/oxide/kernel/drv/amd64/fch 0755 root sys
+f platform/oxide/kernel/drv/amd64/ioms 0755 root sys
 f platform/oxide/kernel/drv/amd64/ipcc 0755 root sys
 f platform/oxide/kernel/drv/amd64/npe 0755 root sys
 f platform/oxide/kernel/drv/amd64/psp 0755 root sys
@@ -781,7 +783,9 @@ f platform/oxide/kernel/drv/amd64/psp_einj 0755 root sys
 f platform/oxide/kernel/drv/amd64/rootnex 0755 root sys
 f platform/oxide/kernel/drv/apob.conf 0644 root sys
 f platform/oxide/kernel/drv/cpc.conf 0644 root sys
+f platform/oxide/kernel/drv/df.conf 0644 root sys
 f platform/oxide/kernel/drv/dwu.conf 0755 root sys
+f platform/oxide/kernel/drv/ioms.conf 0644 root sys
 f platform/oxide/kernel/drv/ipcc.conf 0755 root sys
 f platform/oxide/kernel/drv/os_rot.conf 0644 root sys
 d platform/oxide/kernel/kmdb 0755 root sys

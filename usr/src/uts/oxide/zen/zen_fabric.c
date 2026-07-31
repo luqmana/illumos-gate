@@ -661,7 +661,7 @@ zen_ios_fabric_id(zen_ioms_t *ioms)
 /*
  * Returns the node ID corresponding to this die.
  */
-uint8_t
+uint16_t
 zen_iodie_node_id(const zen_iodie_t *const iodie)
 {
 	return (iodie->zi_node_id);
@@ -692,6 +692,69 @@ uint16_t
 zen_ioms_pci_busno(const zen_ioms_t *const ioms)
 {
 	return (ioms->zio_pci_busno);
+}
+
+/*
+ * Returns the index of this IOMS relative to its IO die.
+ */
+uint8_t
+zen_ioms_num(const zen_ioms_t *const ioms)
+{
+	return (ioms->zio_num);
+}
+
+/*
+ * Returns the index of the IOHC associated with this IOMS.
+ */
+uint8_t
+zen_ioms_iohc_num(const zen_ioms_t *const ioms)
+{
+	return (ioms->zio_iohcnum);
+}
+
+/*
+ * Returns the IOHUB number of this IOMS relative to its containing NBIO.
+ */
+uint8_t
+zen_ioms_iohub_num(const zen_ioms_t *const ioms)
+{
+	return (ioms->zio_iohubnum);
+}
+
+/*
+ * Returns the type of IOHC associated with this IOMS.
+ */
+zen_iohc_type_t
+zen_ioms_iohc_type(const zen_ioms_t *const ioms)
+{
+	return (ioms->zio_iohctype);
+}
+
+/*
+ * Returns the FabricID of this IOMS.
+ */
+uint16_t
+zen_ioms_fabric_id(const zen_ioms_t *const ioms)
+{
+	return (ioms->zio_dest_id);
+}
+
+/*
+ * Returns the NBIO this IOMS is attached to.
+ */
+zen_nbio_t *
+zen_ioms_nbio(const zen_ioms_t *const ioms)
+{
+	return (ioms->zio_nbio);
+}
+
+/*
+ * Returns the index of this NBIO relative to its IO die.
+ */
+uint8_t
+zen_nbio_num(const zen_nbio_t *const nbio)
+{
+	return (nbio->zn_num);
 }
 
 /*
@@ -3536,6 +3599,12 @@ int
 zen_walk_ioms(zen_ioms_cb_f func, void *arg)
 {
 	return (zen_fabric_walk_ioms(&zen_fabric, func, arg));
+}
+
+int
+zen_walk_iodie(zen_iodie_cb_f func, void *arg)
+{
+	return (zen_fabric_walk_iodie(&zen_fabric, func, arg));
 }
 
 typedef struct zen_fabric_nbif_cb {

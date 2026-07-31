@@ -1,0 +1,64 @@
+.\"
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
+.\"
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" http://www.illumos.org/license/CDDL.
+.\"
+.\"
+.\" Copyright 2026 Oxide Computer Company
+.\"
+.Dd July 30, 2026
+.Dt IOMS 4D
+.Os
+.Sh NAME
+.Nm ioms
+.Nd AMD Zen IOMS nexus driver
+.Sh SYNOPSIS
+.Pa /devices/df@*/ioms@*
+.Sh DESCRIPTION
+The
+.Nm
+driver represents the I/O master/slave
+.Pq IOMS
+units found in the data fabric of the AMD Zen family processors used by the
+Oxide architecture.
+Each device node is a child of the
+.Xr df 4D
+node representing the data fabric instance the unit is attached to, and its
+unit address is the die-relative IOMS index.
+Each IOMS connects the data fabric to an I/O hub
+.Pq IOHUB
+containing an IOHUB core
+.Pq IOHC ,
+which hosts one PCIe root complex along with per-unit resources such as an
+IOMMU and IOAPIC.
+One instance of
+.Nm
+exists for every IOMS in the system.
+.Pp
+Each device node carries properties identifying the underlying hardware:
+the data fabric node ID of the containing I/O die
+.Pq Sy node-id ,
+the die-relative IOMS and NBIO indices
+.Pq Sy ioms , Sy nbio ,
+the register instance identity of the I/O hub
+.Pq Sy iohub , Sy iohc , Sy iohc-type ,
+the bus number of the root bus hosted by the unit's PCIe root complex
+.Pq Sy pci-bus ,
+and the fabric identifier to which transactions targeting the unit are
+routed
+.Pq Sy fabric-id .
+.Pp
+At present these nodes serve to make the I/O fabric topology visible in the
+device tree; the PCIe root complexes and other subordinate units remain
+enumerated separately at the root of the tree.
+Over time this driver is expected to become the parent of the corresponding
+root complex and FCH nodes and to take ownership of per-unit resource
+management.
+.Sh SEE ALSO
+.Xr df 4D ,
+.Xr npe 4D

@@ -27,7 +27,7 @@
  * Copyright 2012 Garrett D'Amore <garrett@damore.org>.  All rights reserved.
  * Copyright 2017 Joyent, Inc.
  * Copyright 2020 Ryan Zezeski
- * Copyright 2022 Oxide Computer Co.
+ * Copyright 2026 Oxide Computer Co.
  */
 
 /*
@@ -69,6 +69,8 @@
 #include <sys/ddifm.h>
 #include <sys/ddi_isa.h>
 #include <sys/apic.h>
+#include <sys/io/zen/df.h>
+#include <sys/io/zen/fabric.h>
 
 /*
  * enable/disable extra checking of function parameters. Useful for debugging
@@ -192,6 +194,8 @@ static int rootnex_dma_mctl(dev_info_t *dip, dev_info_t *rdip,
     off_t *offp, size_t *lenp, caddr_t *objp, uint_t cache_flags);
 static int rootnex_ctlops(dev_info_t *dip, dev_info_t *rdip,
     ddi_ctl_enum_t ctlop, void *arg, void *result);
+static int rootnex_bus_config(dev_info_t *dip, uint_t flags,
+    ddi_bus_config_op_t op, void *arg, dev_info_t **childp);
 static int rootnex_fm_init(dev_info_t *dip, dev_info_t *tdip, int tcap,
     ddi_iblock_cookie_t *ibc);
 static int rootnex_intr_ops(dev_info_t *pdip, dev_info_t *rdip,
@@ -252,7 +256,7 @@ static struct bus_ops rootnex_bus_ops = {
 	i_ddi_rootnex_remove_eventcall,
 	i_ddi_rootnex_post_event,
 	0,			/* bus_intr_ctl */
-	0,			/* bus_config */
+	rootnex_bus_config,	/* bus_config */
 	0,			/* bus_unconfig */
 	rootnex_fm_init,	/* bus_fm_init */
 	NULL,			/* bus_fm_fini */
@@ -740,6 +744,198 @@ rootnex_ctl_reportdev(dev_info_t *dev)
 	cmn_err(CE_CONT, "?%s\n", buf);
 	kmem_free(buf, REPORTDEV_BUFSIZE);
 	return (DDI_SUCCESS);
+}
+
+
+/*
+ * ****************************
+ *  bus_config related routines
+ * ****************************
+ */
+
+/*
+ * Create the device node for a single data fabric instance (I/O die), unless
+ * it already exists.  This is idempotent -- a repeat request, or a
+ * BUS_CONFIG_ONE that races the BUS_CONFIG_ALL walk, simply finds the
+ * existing node -- and returns an NDI status.  The df(4D) nexus parents the
+ * per-IOMS nexi and, eventually, everything else that hangs off each I/O
+ * die's data fabric.
+ */
+static int
+rootnex_create_df(dev_info_t *pdip, zen_iodie_t *iodie)
+{
+	const uint16_t nodeid = zen_iodie_node_id(iodie);
+	dev_info_t *dip;
+	char ua[8];
+
+	ASSERT(DEVI_BUSY_OWNED(pdip));
+
+	for (dip = ddi_get_child(pdip); dip != NULL;
+	    dip = ddi_get_next_sibling(dip)) {
+		if (strcmp(ddi_node_name(dip), DF_NODENAME) != 0)
+			continue;
+
+		/*
+		 * A node already exists for this DF -- nothing more to do.
+		 */
+		ASSERT3U(nodeid, !=, (uint16_t)-1);
+		if (ddi_prop_get_int(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
+		    DF_PROP_NODE_ID, -1) == nodeid)
+			return (NDI_SUCCESS);
+	}
+
+	ndi_devi_alloc_sleep(pdip, DF_NODENAME, (pnode_t)DEVI_SID_NODEID,
+	    &dip);
+
+	(void) snprintf(ua, sizeof (ua), "%x", nodeid);
+	if (ndi_prop_update_string(DDI_DEV_T_NONE, dip, "unit-address",
+	    ua) != NDI_SUCCESS ||
+	    ndi_prop_update_int(DDI_DEV_T_NONE, dip, DF_PROP_NODE_ID,
+	    nodeid) != NDI_SUCCESS) {
+		cmn_err(CE_WARN, "rootnex: failed to create %s@%s properties",
+		    DF_NODENAME, ua);
+		goto fail;
+	}
+
+	if (ndi_devi_bind_driver(dip, 0) != NDI_SUCCESS) {
+		cmn_err(CE_WARN, "rootnex: failed to bind %s@%s",
+		    DF_NODENAME, ua);
+		goto fail;
+	}
+
+	return (NDI_SUCCESS);
+
+fail:
+	(void) ndi_devi_free(dip);
+	return (NDI_FAILURE);
+}
+
+/*
+ * Walk callback for BUS_CONFIG_ALL / BUS_CONFIG_DRIVER: create the node for
+ * every I/O die's data fabric.  A creation failure is reported (in
+ * rootnex_create_df) but does not terminate the walk.
+ */
+static int
+rootnex_config_df_cb(zen_iodie_t *iodie, void *arg)
+{
+	(void) rootnex_create_df(arg, iodie);
+	return (0);
+}
+
+/*
+ * Used to find the zen_iodie_t for a specific data fabric node by its node
+ * ID, on behalf of BUS_CONFIG_ONE.
+ */
+typedef struct rootnex_df_find {
+	uint16_t	rdf_nodeid;
+	zen_iodie_t	*rdf_iodie;
+} rootnex_df_find_t;
+
+static int
+rootnex_find_df_cb(zen_iodie_t *iodie, void *arg)
+{
+	rootnex_df_find_t *find = arg;
+
+	if (zen_iodie_node_id(iodie) == find->rdf_nodeid) {
+		find->rdf_iodie = iodie;
+		return (1);
+	}
+
+	return (0);
+}
+
+static int
+rootnex_config_one_df(dev_info_t *pdip, const char *devname)
+{
+	char *devname_dup = NULL, *cdrv, *caddr;
+	size_t devname_sz;
+	u_longlong_t nodeid;
+	rootnex_df_find_t find;
+	int ret;
+
+	devname_dup = i_ddi_strdup(devname, KM_SLEEP);
+	devname_sz = strlen(devname_dup) + 1;
+	i_ddi_parse_name(devname_dup, &cdrv, &caddr, NULL);
+
+	if (cdrv == NULL || caddr == NULL) {
+		ret = NDI_EINVAL;
+		goto out;
+	}
+
+	/*
+	 * Bail on non-df children with no error.
+	 */
+	if (strcmp(cdrv, DF_NODENAME) != 0) {
+		ret = NDI_SUCCESS;
+		goto out;
+	}
+
+	if (ddi_strtoull(caddr, NULL, 16, &nodeid) != 0 ||
+	    nodeid > UINT16_MAX) {
+		ret = NDI_EINVAL;
+		goto out;
+	}
+
+	find.rdf_nodeid = (uint16_t)nodeid;
+	find.rdf_iodie = NULL;
+
+	kmem_free(devname_dup, devname_sz);
+	devname_dup = NULL;
+
+	(void) zen_walk_iodie(rootnex_find_df_cb, &find);
+	if (find.rdf_iodie == NULL) {
+		ret = NDI_EINVAL;
+		goto out;
+	}
+
+	ret = rootnex_create_df(pdip, find.rdf_iodie);
+
+out:
+	if (devname_dup != NULL)
+		kmem_free(devname_dup, devname_sz);
+	return (ret);
+}
+
+/*
+ * rootnex_bus_config()
+ *
+ * The data fabric nexi (df) are the only children we create ourselves.  Every
+ * other child of the root either already exists by the time this can be called
+ * (created during early boot) or comes from driver.conf files, and both kinds
+ * are resolved by the framework default we tail-call.  We therefore create
+ * therefore create the df node(s) implied by the request and then always
+ * defer to the framework, whatever the request named.  We deliberately do
+ * not modify the caller's flags and leave whether to attach up to the caller.
+ */
+static int
+rootnex_bus_config(dev_info_t *dip, uint_t flags, ddi_bus_config_op_t op,
+    void *arg, dev_info_t **childp)
+{
+	int ret;
+
+	switch (op) {
+	case BUS_CONFIG_ONE:
+	case BUS_CONFIG_ALL:
+	case BUS_CONFIG_DRIVER:
+		break;
+	default:
+		return (NDI_FAILURE);
+	}
+
+	ndi_devi_enter(dip);
+	if (op == BUS_CONFIG_ONE) {
+		ASSERT3P(arg, !=, NULL);
+		ret = rootnex_config_one_df(dip, (const char *)arg);
+	} else {
+		(void) zen_walk_iodie(rootnex_config_df_cb, dip);
+		ret = NDI_SUCCESS;
+	}
+	ndi_devi_exit(dip);
+
+	if (ret != NDI_SUCCESS)
+		return (ret);
+
+	return (ndi_busop_bus_config(dip, flags, op, arg, childp, 0));
 }
 
 
