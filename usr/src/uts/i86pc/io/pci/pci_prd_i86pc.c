@@ -71,7 +71,7 @@ static void acpi_pci_probe(void);
 static int mps_find_bus_res(uint32_t, pci_prd_rsrc_t, struct memlist **);
 static void hrt_probe(void);
 static int hrt_find_bus_res(uint32_t, pci_prd_rsrc_t, struct memlist **);
-static int acpi_find_bus_res(uint32_t, pci_prd_rsrc_t, struct memlist **);
+static size_t acpi_find_bus_res(uint32_t, pci_prd_rsrc_t, struct memlist **);
 static uchar_t *find_sig(uchar_t *cp, int len, char *sig);
 static int checksum(unsigned char *cp, int len);
 static ACPI_STATUS acpi_wr_cb(ACPI_RESOURCE *rp, void *context);
@@ -202,7 +202,7 @@ acpi_trim_bus_ranges(void)
 	pci_memlist_free_all(&ranges);	/* OK if ranges == NULL */
 }
 
-static int
+static size_t
 acpi_find_bus_res(uint32_t bus, pci_prd_rsrc_t type, struct memlist **res)
 {
 	ASSERT3U(bus, <, PCI_MAX_BUS_NUM);
@@ -225,8 +225,8 @@ acpi_find_bus_res(uint32_t bus, pci_prd_rsrc_t type, struct memlist **res)
 		break;
 	}
 
-	/* pci_memlist_count() treats NULL head as zero-length */
-	return (pci_memlist_count(*res));
+	/* memlist_count() treats NULL head as zero-length */
+	return (memlist_count(*res));
 }
 
 static struct memlist **

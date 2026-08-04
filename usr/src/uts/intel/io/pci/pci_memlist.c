@@ -23,7 +23,7 @@
  * Use is subject to license terms.
  *
  * Copyright 2020 OmniOS Community Edition (OmniOSce) Association.
- * Copyright 2024 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -343,16 +343,4 @@ pci_memlist_dup(struct memlist *listp)
 	}
 
 	return (head);
-}
-
-int
-pci_memlist_count(struct memlist *listp)
-{
-	int count = 0;
-	while (listp) {
-		count++;
-		listp = listp->ml_next;
-	}
-
-	return (count);
 }

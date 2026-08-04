@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2024 Oxide Computer Co.
+ * Copyright 2026 Oxide Computer Co.
  */
 
 /*
@@ -818,19 +818,6 @@ fch_get_child_reg(dev_info_t *cdip, fch_rangespec_t **frpp)
 	}
 
 	return (nreg);
-}
-
-/* XXX duplicates the implementation in pci_memlist.c.  Should be generic. */
-static inline uint_t
-memlist_count(const memlist_t *ml)
-{
-	uint_t count = 0;
-	while (ml != NULL) {
-		++count;
-		ml = ml->ml_next;
-	}
-
-	return (count);
 }
 
 typedef enum fch_child_flags {
@@ -2649,7 +2636,8 @@ fch_ioms_cb(zen_ioms_t *ioms, void *arg)
 	int reg[6] = { 0 };
 	int res;
 	fch_rangespec_t *frp = NULL, *ufrp = NULL;
-	uint_t mlcount, rangecount, usable_rangecount = 0;
+	size_t mlcount;
+	uint_t rangecount, usable_rangecount = 0;
 	ndi_ra_request_t rr;
 	uint64_t rr_base, rr_len;
 	const char *ident;

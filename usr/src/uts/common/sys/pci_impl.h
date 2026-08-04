@@ -22,7 +22,7 @@
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  * Copyright 2018 Joyent, Inc.
- * Copyright 2024 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef _SYS_PCI_IMPL_H
@@ -131,7 +131,6 @@ extern void pci_memlist_dump(struct memlist *);
 extern void pci_memlist_subsume(struct memlist **, struct memlist **);
 extern void pci_memlist_merge(struct memlist **, struct memlist **);
 extern struct memlist *pci_memlist_dup(struct memlist *);
-extern int pci_memlist_count(struct memlist *);
 
 #endif /* __i386 || __amd64 */
 

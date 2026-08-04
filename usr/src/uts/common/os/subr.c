@@ -25,6 +25,7 @@
 
 /*
  * Copyright 2019 Joyent, Inc.
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*	Copyright (c) 1984, 1986, 1987, 1988, 1989 AT&T	*/
@@ -404,6 +405,22 @@ address_in_memlist(struct memlist *mp, uint64_t addr, size_t len)
 		mp = mp->ml_next;
 	}
 	return (0);	/* FALSE */
+}
+
+/*
+ * Returns the count of items in memlist mp.
+ */
+size_t
+memlist_count(const struct memlist *mp)
+{
+	size_t count = 0;
+
+	while (mp != NULL) {
+		count++;
+		mp = mp->ml_next;
+	}
+
+	return (count);
 }
 
 /*

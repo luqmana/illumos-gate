@@ -23,7 +23,7 @@
  * Copyright 2019 Joyent, Inc.
  * Copyright 2019 Western Digital Corporation
  * Copyright 2020 OmniOS Community Edition (OmniOSce) Association.
- * Copyright 2024 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -3417,7 +3417,7 @@ memlist_to_ranges(void **rp, struct memlist *list, const int bus,
 static void
 add_ranges_prop(int bus, boolean_t ppb)
 {
-	int total, alloc_size;
+	size_t total, alloc_size;
 	void	*rp, *next_rp;
 	struct memlist *iolist, *memlist, *pmemlist;
 
@@ -3436,9 +3436,9 @@ add_ranges_prop(int bus, boolean_t ppb)
 	pci_memlist_merge(&pci_bus_res[bus].pmem_avail, &pmemlist);
 	pci_memlist_merge(&pci_bus_res[bus].pmem_used, &pmemlist);
 
-	total = pci_memlist_count(iolist);
-	total += pci_memlist_count(memlist);
-	total += pci_memlist_count(pmemlist);
+	total = memlist_count(iolist);
+	total += memlist_count(memlist);
+	total += memlist_count(pmemlist);
 
 	/* no property is created if no ranges are present */
 	if (total == 0)
@@ -3475,11 +3475,11 @@ pci_memlist_remove_list(struct memlist **list, struct memlist *remove_list)
 	}
 }
 
-static int
+static size_t
 memlist_to_spec(struct pci_phys_spec *sp, const int bus, struct memlist *list,
     const uint32_t type)
 {
-	uint_t i = 0;
+	size_t i = 0;
 
 	while (list != NULL) {
 		uint32_t newtype = type;
@@ -3515,16 +3515,16 @@ memlist_to_spec(struct pci_phys_spec *sp, const int bus, struct memlist *list,
 static void
 add_bus_available_prop(int bus)
 {
-	int i, count;
+	size_t i, count;
 	struct pci_phys_spec *sp;
 
 	/* no devinfo node - unused bus, return */
 	if (pci_bus_res[bus].dip == NULL)
 		return;
 
-	count = pci_memlist_count(pci_bus_res[bus].io_avail) +
-	    pci_memlist_count(pci_bus_res[bus].mem_avail) +
-	    pci_memlist_count(pci_bus_res[bus].pmem_avail);
+	count = memlist_count(pci_bus_res[bus].io_avail) +
+	    memlist_count(pci_bus_res[bus].mem_avail) +
+	    memlist_count(pci_bus_res[bus].pmem_avail);
 
 	if (count == 0)		/* nothing available */
 		return;
@@ -3536,7 +3536,7 @@ add_bus_available_prop(int bus)
 	    PCI_ADDR_MEM32 | PCI_RELOCAT_B);
 	i += memlist_to_spec(&sp[i], bus, pci_bus_res[bus].pmem_avail,
 	    PCI_ADDR_MEM32 | PCI_RELOCAT_B | PCI_PREFETCH_B);
-	ASSERT(i == count);
+	ASSERT3U(i, ==, count);
 
 	(void) ndi_prop_update_int_array(DDI_DEV_T_NONE, pci_bus_res[bus].dip,
 	    "available", (int *)sp,
