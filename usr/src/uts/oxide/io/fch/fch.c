@@ -87,11 +87,11 @@
  * (e.g., the console setup) relies on it but also because consumers of some of
  * our childen generally need to be able to rely on identifying a specific piece
  * of hardware to use.  There are two places we consider the unit address: one
- * is for our own device node, for which the UA is under the *direct* control of
- * rootnex but which we can influence; the other is for our children.  Our own
- * UA is effectively set in fch_ioms_cb() by relying on a Private rootnex
- * behaviour; see the comment there for details.  When we name our children, we
- * always do so such that each child of a given kind (node name) has as its UA
+ * is for our own device node, which is created and named by our parent, the
+ * ioms(4D) nexus -- each FCH is a singleton with no address on any bus, so the
+ * parent gives it an empty UA and the node is identified positionally by its
+ * df@/ioms@ ancestry; the other is for our children.  We always name our
+ * children such that each child of a given kind (node name) has as its UA
  * its index into the array of children of the same kind below the same FCH
  * nexus.  Thus if an FCH has 3 UARTs, those UARTs will be "0", "1", and "2"; if
  * the same FCH also has three I2C controllers, they will likewise be "0", "1",
@@ -126,19 +126,14 @@
  * actually contains many disparate peripherals sharing just 2 pages of
  * registers.
  *
- * In principle, this nexus should be a child of the IOMS to which it's
- * attached, and that IOMS's driver should have created appropriate "ranges" and
- * other properties prior to our attaching to identify the resources available
- * to us and our children.  Because that doesn't exist, we use the same
- * hackaround used by pci_autoconfig to generate PCI bus nexi and by isa to
- * generate its own node: the fch_enumerate() routine does what the parent we
- * don't have should have done for us.  Although that parent doesn't currently
- * exist, we still rely on other software reserving the resources we need and
- * providing them to us, currently via zen_gen_resource_subsume() which is
- * also analogous to the PCI PRD mechanism but without the intermediate
- * abstraction that would be required to make this driver machine-independent.
- * That software must also ensure that access to those MMIO and legacy IO
- * regions is routed over the DF to the correct IOMS.
+ * This nexus is a child of the ioms(4D) nexus representing the IOMS to which
+ * the FCH is attached.  That parent owns the generic (non-PCI) address space
+ * the DF routes to its unit.  It creates our node and grants us the windows we
+ * decode via the "ranges" property (and, for the primary FCH, describes our
+ * own registers via "reg") before we attach -- see the theory statement in
+ * ioms.c.  At attach time we stand up resource maps from that grant and
+ * sub-allocate it to our children.  We never reach into the fabric ourselves,
+ * which also keeps this driver free of machine-dependent code.
  *
  * Each child regspec definition is relative to the FCH's base address or to the
  * base address the FCH would have if it were the primary FCH.  This allows us
@@ -662,163 +657,19 @@
 #include <sys/io/fch/i2c.h>
 #include <sys/io/fch/i3c.h>
 #include <sys/io/fch/ixbar.h>
-#include <sys/io/fch/pmio.h>
+#include <sys/io/fch/props.h>
+#include <sys/io/fch/ranges.h>
 #include <sys/io/fch/smi.h>
 #include <sys/io/fch/uart.h>
-#include <sys/io/zen/fabric.h>
+#include <sys/io/zen/fch.h>
 #include <sys/io/zen/physaddrs.h>
-#include <sys/io/zen/smn.h>
 
-#include "fch_props.h"
 #include "fch_impl.h"
 #include "ixbar.h"
 
-#define	FCH_PROPNAME_RANGES		"ranges"
 #define	FCH_PROPNAME_MODEL		"model"
-#define	FCH_PROPNAME_REG		"reg"
 #define	FCH_PROPNAME_INTR		"interrupts"
 #define	FCH_PROPNAME_INTR_PRI		"interrupt-priorities"
-
-/* XXX should be generic DDI; see notes in milan_fabric.c. */
-typedef enum fch_addrsp {
-	FA_NONE,
-	FA_LEGACY,
-	FA_MMIO,
-	FA_INVALID	/* Keep this last; see assertion below. */
-} fch_addrsp_t;
-
-#define	FCH_NADDRSP	2
-
-CTASSERT(FCH_NADDRSP == (FA_INVALID - 1));
-
-static inline uint64_t
-fch_addrsp_to_bustype(const fch_addrsp_t addrsp)
-{
-	switch (addrsp) {
-	case FA_LEGACY:
-		return (1);
-	case FA_MMIO:
-		return (0);
-	default:
-		panic("invalid FCH address space %d cannot be translated",
-		    addrsp);
-	}
-}
-
-/*
- * XXX This largely replicates pci_phys_spec but with different addrsp semantics
- * that could be made compatible if we really wanted to.  The fr_addrsp member
- * is really an fch_addrsp_t, but we define it this way to guarantee its size
- * which we rely upon for cramming these into DDI properties.
- */
-typedef struct fch_rangespec {
-	uint32_t	fr_addrsp;
-	uint32_t	fr_physhi;
-	uint32_t	fr_physlo;
-	uint32_t	fr_sizehi;
-	uint32_t	fr_sizelo;
-} fch_rangespec_t;
-
-static const uint_t INTS_PER_RANGESPEC =
-	(sizeof (fch_rangespec_t) / sizeof (uint32_t));
-
-/*
- * This describes the legacy struct regspec that we're forced to use if we want
- * to map our own registers using ddi_regs_map_setup(9f).  Our parent is
- * rootnex, and understands only rudimentary 32-bit legacy IO or MMIO "reg"
- * properties with DDI_MT_RNUMBER mapping requests.  We could instead modify
- * rootnex to interpret DDI_MT_RNUMBER with DDI_MF_EXT_REGSPEC to mean "assume I
- * have 5x 32-bit 'reg' properties", but there's currently no plumbing between
- * ddi_regs_map_setup() and the NDI that allows for this and no other way for
- * rootnex to know.  In principle, the properties of a child that a nexus relies
- * upon are private to that nexus, but in practice rootnex's children are always
- * created by the child itself.  So our options are:
- *
- * 1. Use the Private ddi_map() instead of ddi_regs_map_setup().
- * 2. Add an oxide-Private 1275 property of which rootnex and its children are
- *    aware that indicates the "reg" property of a child contains 64-bit values,
- *    in which case rootnex can always interpret DDI_MT_RNUMBER requests
- *    properly and we can use ddi_regs_map_setup().
- * 3. Force enumeration of rootnex's children through rootnex itself,
- *    eliminating the ability of a child to create its own device node attached
- *    to rootnex.  This would restore rootnex's privacy and allow it to always
- *    use 64-bit properties for its direct children.  This seems ideal, but it
- *    would also leave us with the problem of what to do about nexi that pass
- *    DDI_MT_RNUMBER requests up to rootnex for their children.  While the ideal
- *    answer is that child nexi wanting to do that must conform to rootnex's
- *    (Private) property formats, that seems a bit unreasonable both in
- *    principle and in terms of supporting existing nexi.
- * 4. Cope with the fact that DDI_MT_RNUMBER means 32-bits.
- *
- * For sake of immediate simplicity I've opted for (4), but (1) would be quite
- * reasonable too.  The other paths require much more research and work.
- */
-static const uint_t INTS_PER_REGSPEC =
-	(sizeof (struct regspec) / sizeof (uint32_t));
-
-static inline uint64_t
-fch_rangespec_addr(const fch_rangespec_t *const frp)
-{
-	uint64_t addr;
-
-	addr = (uint64_t)frp->fr_physhi;
-	addr <<= 32;
-	addr |= (uint64_t)frp->fr_physlo;
-
-	return (addr);
-}
-
-static inline uint64_t
-fch_rangespec_size(const fch_rangespec_t *const frp)
-{
-	uint64_t size;
-
-	size = (uint64_t)frp->fr_sizehi;
-	size <<= 32;
-	size |= (uint64_t)frp->fr_sizelo;
-
-	return (size);
-}
-
-/* XXX see also pci_type_ra2pci() */
-static char *
-fch_rangespec_to_ndi_ra_type(const fch_rangespec_t *const frp)
-{
-	switch (frp->fr_addrsp) {
-	case FA_LEGACY:
-		return (NDI_RA_TYPE_IO);
-	case FA_MMIO:
-		return (NDI_RA_TYPE_MEM);
-	default:
-		return (NULL);
-	}
-}
-
-static uint_t
-fch_get_child_reg(dev_info_t *cdip, fch_rangespec_t **frpp)
-{
-	uint_t nint, nreg;
-
-	*frpp = NULL;
-
-	if (ddi_prop_lookup_int_array(DDI_DEV_T_ANY, cdip, DDI_PROP_DONTPASS,
-	    FCH_PROPNAME_REG, (int **)frpp, &nint) != DDI_SUCCESS) {
-		nint = 0;
-	}
-
-	if (nint % INTS_PER_RANGESPEC != 0) {
-		dev_err(cdip, CE_WARN, "incomplete or extraneous '%s' entries",
-		    FCH_PROPNAME_REG);
-	}
-
-	nreg = nint / INTS_PER_RANGESPEC;
-	if (nreg == 0 && *frpp != NULL) {
-		ddi_prop_free(frpp);
-		*frpp = NULL;
-	}
-
-	return (nreg);
-}
 
 typedef enum fch_child_flags {
 	FCF_NONE,
@@ -861,7 +712,6 @@ static const uint_t INTS_PER_INTRSPEC =
 	(sizeof (fch_intrspec_t) / sizeof (uint32_t));
 
 typedef struct fch_def {
-	const char		*fd_nodename;
 	const char		*fd_desc;
 	fch_kind_t		fd_kind;
 	fch_rangespec_t		fd_range_bases[FCH_NADDRSP];
@@ -1281,7 +1131,6 @@ static const fch_child_def_t *const kunlun_children[] = {
 
 static const fch_def_t fch_defs[] = {
 	{
-		.fd_nodename = "huashan",
 		.fd_desc = "AMD Huashan Fusion Controller Hub",
 		.fd_kind = FK_HUASHAN,
 		.fd_range_bases = {
@@ -1300,7 +1149,6 @@ static const fch_def_t fch_defs[] = {
 		.fd_children = huashan_children
 	},
 	{
-		.fd_nodename = "songshan",
 		.fd_desc = "AMD Songshan Fusion Controller Hub",
 		.fd_kind = FK_SONGSHAN,
 		.fd_range_bases = {
@@ -1319,7 +1167,6 @@ static const fch_def_t fch_defs[] = {
 		.fd_children = songshan_children
 	},
 	{
-		.fd_nodename = "kunlun",
 		.fd_desc = "AMD Kunlun Fusion Controller Hub",
 		.fd_kind = FK_KUNLUN,
 		.fd_range_bases = {
@@ -1431,7 +1278,7 @@ fch_child_is_usable(const fch_t *const fch, const fch_child_def_t *const cdp)
  * regspec rsp is contained completely within one of the child's register
  * regions described by regs/nregs.  It is the caller's responsibility to ensure
  * that regs and nregs are no less restrictive than what would be returned by
- * fch_get_child_reg.  We choose to require that the base address requested lie
+ * fch_get_regs.  We choose to require that the base address requested lie
  * within a valid region even if the request length is 0.
  */
 static boolean_t
@@ -1490,19 +1337,21 @@ fch_bus_map(dev_info_t *dip, dev_info_t *rdip, ddi_map_req_t *mp, off_t offset,
 	uint_t nregs;
 	ddi_map_req_t mr = *mp;
 
-	nregs = fch_get_child_reg(rdip, &frp_child);
+	nregs = fch_get_regs(rdip, &frp_child);
 
 	/*
-	 * XXX In an ideal world, regspec64 will go the way of the dodo on oxide
-	 * and we will make fch_rangespec_t or something similarly flexible,
-	 * rigorous, and PCI-compatible its generic replacement as the
-	 * rootnex/assumed representation.  We would also have an IOMS as our
-	 * parent rather than rootnex itself, the rootnex representing the DF
-	 * (or meta-DF if there is more than one), which would also use the more
-	 * flexible spec type.  In the meantime, however, we do want to take
-	 * advantage of rootnex's generic mapping code which requires that we
-	 * translate into regspec64's hardcoded address space ("bus type")
-	 * format.
+	 * In an ideal world, regspec & regspec64 would be replaced with
+	 * fch_rangespec_t or something similarly flexible, rigorous, and
+	 * PCI-compatible as the default rootnex/assumed representation.
+	 * We don't live in such a world yet and so we have to translate
+	 * between our private contract with our children (see fch_rangespec_t
+	 * and see sys/io/fch/ranges.h) and the generic mapping code's contract
+	 * with us (regspec64).  All mapping requests reach us in
+	 * fch_rangespec_t terms: it is our children's "reg" format, indexed by
+	 * DDI_MT_RNUMBER requests, and the payload of DDI_MT_REGSPEC requests
+	 * as well.  Only once a request has been resolved and checked against
+	 * the child's registers do we translate it into an extended regspec64
+	 * and send it toward the root nexus.
 	 */
 	switch (mp->map_type) {
 	case DDI_MT_REGSPEC:
@@ -1670,7 +1519,7 @@ fch_bus_ctl(dev_info_t *dip, dev_info_t *rdip, ddi_ctl_enum_t ctlop, void *arg,
 			return (DDI_FAILURE);
 		}
 
-		nreg = fch_get_child_reg(rdip, &frp);
+		nreg = fch_get_regs(rdip, &frp);
 		if (idx >= nreg) {
 			if (nreg != 0)
 				ddi_prop_free(frp);
@@ -1701,7 +1550,7 @@ fch_bus_ctl(dev_info_t *dip, dev_info_t *rdip, ddi_ctl_enum_t ctlop, void *arg,
 		 * gone awry and we treat it as a failure rather than telling
 		 * the caller there are zero.
 		 */
-		nreg = fch_get_child_reg(rdip, &frp);
+		nreg = fch_get_regs(rdip, &frp);
 		if (nreg == 0) {
 			return (DDI_FAILURE);
 		}
@@ -1946,7 +1795,7 @@ fch_unconfig_child(fch_t *fch, dev_info_t *cdip)
 	fch_rangespec_t *frp;
 	uint_t nregs;
 
-	nregs = fch_get_child_reg(cdip, &frp);
+	nregs = fch_get_regs(cdip, &frp);
 	ASSERT3U(nregs, !=, 0);
 	for (uint_t i = 0; i < nregs; i++) {
 		(void) ndi_ra_free(pdip, fch_rangespec_addr(frp + i),
@@ -2408,6 +2257,119 @@ fch_bus_intr_op(dev_info_t *dip, dev_info_t *rdip, ddi_intr_op_t op,
 	return (NDI_FAILURE);
 }
 
+/*
+ * Stand up our resource maps from the address space our parent granted us via
+ * the "ranges" property, then reserve within them everything already spoken
+ * for: our own registers (described by our "reg" property, if we have one) so
+ * we don't accidentally hand them out to a child, and the registers of any
+ * existing children -- child nodes, along with their "reg" properties,
+ * persist across a detach/re-attach cycle of this driver even though the maps
+ * do not.  Everything left is available for sub-allocation to children as
+ * they are configured.
+ */
+static int
+fch_setup_resources(fch_t *fch)
+{
+	dev_info_t *dip = fch->f_dip;
+	fch_rangespec_t *frp = NULL;
+	uint_t nint, nreg;
+	ndi_ra_request_t rr;
+	uint64_t rr_base, rr_len;
+	int res;
+
+	if (ddi_prop_lookup_int_array(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
+	    FCH_PROPNAME_RANGES, (int **)&frp, &nint) != DDI_SUCCESS) {
+		dev_err(dip, CE_WARN, "'%s' property is missing",
+		    FCH_PROPNAME_RANGES);
+		return (DDI_FAILURE);
+	}
+
+	if (nint == 0 || nint % INTS_PER_RANGESPEC != 0) {
+		dev_err(dip, CE_WARN, "incomplete or extraneous '%s' entries",
+		    FCH_PROPNAME_RANGES);
+		ddi_prop_free(frp);
+		return (DDI_FAILURE);
+	}
+
+	if (ndi_ra_map_setup(dip, NDI_RA_TYPE_IO) != NDI_SUCCESS ||
+	    ndi_ra_map_setup(dip, NDI_RA_TYPE_MEM) != NDI_SUCCESS) {
+		dev_err(dip, CE_WARN, "failed to set up resource maps");
+		goto fail;
+	}
+
+	for (uint_t ridx = 0; ridx < nint / INTS_PER_RANGESPEC; ridx++) {
+		res = ndi_ra_free(dip, fch_rangespec_addr(frp + ridx),
+		    fch_rangespec_size(frp + ridx),
+		    fch_rangespec_to_ndi_ra_type(frp + ridx), 0);
+		VERIFY3S(res, ==, NDI_SUCCESS);
+	}
+	ddi_prop_free(frp);
+	frp = NULL;
+
+	/*
+	 * Our own registers, described by our parent in the same rangespec
+	 * format as our children's.  A secondary FCH has none, and no "reg"
+	 * at all.
+	 */
+	nreg = fch_get_regs(dip, &frp);
+	for (uint_t ridx = 0; ridx < nreg; ridx++) {
+		bzero(&rr, sizeof (rr));
+		rr.ra_flags = NDI_RA_ALLOC_SPECIFIED;
+		rr.ra_addr = fch_rangespec_addr(frp + ridx);
+		rr.ra_len = fch_rangespec_size(frp + ridx);
+		if (rr.ra_len == 0)
+			continue;
+		if (ndi_ra_alloc(dip, &rr, &rr_base, &rr_len,
+		    fch_rangespec_to_ndi_ra_type(frp + ridx), 0) !=
+		    NDI_SUCCESS) {
+			dev_err(dip, CE_WARN,
+			    "failed to reserve own registers");
+			goto fail;
+		}
+	}
+	if (nreg > 0) {
+		ddi_prop_free(frp);
+		frp = NULL;
+	}
+
+	ndi_devi_enter(dip);
+	for (dev_info_t *cdip = ddi_get_child(dip); cdip != NULL;
+	    cdip = ddi_get_next_sibling(cdip)) {
+		fch_rangespec_t *crp;
+		uint_t ncreg = fch_get_regs(cdip, &crp);
+
+		for (uint_t ridx = 0; ridx < ncreg; ridx++) {
+			bzero(&rr, sizeof (rr));
+			rr.ra_flags = NDI_RA_ALLOC_SPECIFIED;
+			rr.ra_addr = fch_rangespec_addr(crp + ridx);
+			rr.ra_len = fch_rangespec_size(crp + ridx);
+			if (ndi_ra_alloc(dip, &rr, &rr_base, &rr_len,
+			    fch_rangespec_to_ndi_ra_type(crp + ridx), 0) !=
+			    NDI_SUCCESS) {
+				dev_err(dip, CE_WARN, "failed to reserve "
+				    "existing child %s@%s registers",
+				    ddi_node_name(cdip),
+				    ddi_get_name_addr(cdip));
+				ddi_prop_free(crp);
+				ndi_devi_exit(dip);
+				goto fail;
+			}
+		}
+		if (ncreg > 0)
+			ddi_prop_free(crp);
+	}
+	ndi_devi_exit(dip);
+
+	return (DDI_SUCCESS);
+
+fail:
+	(void) ndi_ra_map_destroy(dip, NDI_RA_TYPE_IO);
+	(void) ndi_ra_map_destroy(dip, NDI_RA_TYPE_MEM);
+	if (frp != NULL)
+		ddi_prop_free(frp);
+	return (DDI_FAILURE);
+}
+
 static int
 fch_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 {
@@ -2428,7 +2390,9 @@ fch_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	ident = ddi_node_name(dip);
 
 	for (uint_t i = 0; i < ARRAY_SIZE(fch_defs); i++) {
-		if (strcmp(fch_defs[i].fd_nodename, ident) == 0) {
+		const char *nodename = fch_kind_name(fch_defs[i].fd_kind);
+
+		if (nodename != NULL && strcmp(nodename, ident) == 0) {
 			def = &fch_defs[i];
 			break;
 		}
@@ -2456,17 +2420,26 @@ fch_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	fch->f_def = def;
 	mutex_init(&fch->f_mutex, NULL, MUTEX_DRIVER, NULL);
 
-	if (strcmp(role, FCH_FABRIC_ROLE_PRI) == 0) {
+	if (strcmp(role, FCH_FABRIC_ROLE_PRI) == 0)
 		fch->f_flags |= FF_PRIMARY;
-		if ((fch->f_ixbar = fch_ixbar_setup(fch->f_dip)) == NULL) {
-			ddi_prop_free(role);
-			mutex_destroy(&fch->f_mutex);
-			ddi_soft_state_free(fch_state, inst);
-
-			return (DDI_FAILURE);
-		}
-	}
 	ddi_prop_free(role);
+
+	if (fch_setup_resources(fch) != DDI_SUCCESS) {
+		mutex_destroy(&fch->f_mutex);
+		ddi_soft_state_free(fch_state, inst);
+
+		return (DDI_FAILURE);
+	}
+
+	if ((fch->f_flags & FF_PRIMARY) != 0 &&
+	    (fch->f_ixbar = fch_ixbar_setup(fch->f_dip)) == NULL) {
+		(void) ndi_ra_map_destroy(dip, NDI_RA_TYPE_IO);
+		(void) ndi_ra_map_destroy(dip, NDI_RA_TYPE_MEM);
+		mutex_destroy(&fch->f_mutex);
+		ddi_soft_state_free(fch_state, inst);
+
+		return (DDI_FAILURE);
+	}
 
 	VERIFY0(ddi_prop_update_string(DDI_DEV_T_NONE, dip,
 	    FCH_PROPNAME_MODEL, (char *)def->fd_desc));
@@ -2500,6 +2473,14 @@ fch_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		fch_ixbar_teardown(fch->f_ixbar);
 		fch->f_ixbar = NULL;
 	}
+
+	/*
+	 * The maps stood up by fch_setup_resources() must go with us as a
+	 * subsequent attach rebuilds them from the "ranges" and "reg"
+	 * properties, which persist on our node and our children's.
+	 */
+	(void) ndi_ra_map_destroy(dip, NDI_RA_TYPE_IO);
+	(void) ndi_ra_map_destroy(dip, NDI_RA_TYPE_MEM);
 
 	mutex_destroy(&fch->f_mutex);
 	ddi_soft_state_free(fch_state, fch->f_inst);
@@ -2548,371 +2529,6 @@ static struct modlinkage fch_modlinkage = {
 	.ml_linkage = { &fch_modldrv, NULL }
 };
 
-/*
- * Add the contents of memlist ml to the set of preallocated ranges frp,
- * assuming address space as.  The memlist is freed after conversion and the
- * return value is the number of ranges used, which may be smaller than the
- * number of memlist entries.  This coalesces adjacent memlist spans into a
- * single range and discards empty memlist spans.
- */
-static uint_t
-memlist_to_ranges(memlist_t *ml, fch_rangespec_t *frp, fch_addrsp_t as)
-{
-	memlist_t *next;
-	uint64_t size = 0, end = 0;
-	uint_t ridx;
-
-	for (ridx = 0; ml != NULL; ml = next) {
-		next = ml->ml_next;
-		if (ml->ml_size == 0) {
-			kmem_free(ml, sizeof (memlist_t));
-			continue;
-		}
-
-		/* Overflowing 64-bit space is always a bug. */
-		VERIFY3U(ml->ml_address + (ml->ml_size - 1), >=,
-		    ml->ml_address);
-
-		size = ml->ml_size;
-		end = ml->ml_address + (ml->ml_size - 1);
-
-		frp[ridx].fr_physlo = (uint32_t)ml->ml_address;
-		frp[ridx].fr_physhi = (uint32_t)(ml->ml_address >> 32);
-
-		kmem_free(ml, sizeof (memlist_t));
-
-		/* Check for contiguous spans and coalesce. */
-		while (next != NULL && next->ml_address == end + 1) {
-			ml = next;
-			next = ml->ml_next;
-
-			VERIFY3U(size, <, size + ml->ml_size);
-			VERIFY3U(end, <, end + ml->ml_size);
-
-			size += ml->ml_size;
-			end += ml->ml_size;
-
-			kmem_free(ml, sizeof (memlist_t));
-		}
-
-		/* Close out and count this range. */
-		frp[ridx].fr_sizelo = (uint32_t)size;
-		frp[ridx].fr_sizehi = (uint32_t)(size >> 32);
-		frp[ridx].fr_addrsp = as;
-		ridx++;
-	}
-
-	return (ridx);
-}
-
-/*
- * XXX We're going to want to abstract this away so that this driver can be
- * generic, first by having a parent representing either the IOMS on the oxide
- * arch or something else if we want this on i86pc.  That parent can eliminate
- * the need for the Zen-specific walk here.  We also would need to add another
- * layer to the subsume logic as in the PCI PRD or have that parent supply our
- * address space.  There are other ways of figuring this out but they require
- * reaching into a lot of private data.  This driver is mostly capable of
- * supporting many other families, but we only support the same subset of
- * Zen-based processors as the rest of the oxide architecture.  Note, this
- * relies upon the fact we can access the FCH registers we care about uniformly
- * (i.e., fch_pmio_smn_reg() calls rather than per-family functions).  If adding
- * a new FCH-kind/processor family, one must ensure that continues to be the
- * case for this approach.
- *
- * This function is best thought of as a hacked-in parent's bus_config_one().
- * The dip we will operate on is the FCH's itself; the parent is rootnex because
- * there is no node for the IOMS.
- */
-static int
-fch_ioms_cb(zen_ioms_t *ioms, void *arg)
-{
-	dev_info_t *dip = NULL;
-	zen_iodie_t *iodie = zen_ioms_iodie(ioms);
-	const smn_reg_t enreg = fch_pmio_smn_reg(D_FCH_PMIO_ALTMMIOEN, 0);
-	const smn_reg_t bar = fch_pmio_smn_reg(D_FCH_PMIO_ALTMMIOBASE, 0);
-	memlist_t *ioml, *mmml;
-	boolean_t is_primary = B_FALSE;
-	int reg[6] = { 0 };
-	int res;
-	fch_rangespec_t *frp = NULL, *ufrp = NULL;
-	size_t mlcount;
-	uint_t rangecount, usable_rangecount = 0;
-	ndi_ra_request_t rr;
-	uint64_t rr_base, rr_len;
-	const char *ident;
-
-	if ((zen_ioms_flags(ioms) & ZEN_IOMS_F_HAS_FCH) == 0)
-		return (0);
-
-	if ((zen_iodie_flags(iodie) & ZEN_IODIE_F_PRIMARY) != 0) {
-		uint32_t val;
-
-		/*
-		 * The FCH::PM::ALTMMIO{BASE,EN} registers don't have any effect
-		 * on primary FCHs that we can tell.  We never set this for a
-		 * primary FCH and this code executes only one per boot (because
-		 * we aren't in rootnex's BUS_CONFIG_xx path here, there is no
-		 * way to tear down our device node), so if it has somehow come
-		 * to be set this implies that we don't support this FCH and it
-		 * may be hazardous to proceed.  We could consider moving this
-		 * below the chiprev_family() check and clearing out this bogus
-		 * state for FCHs we really think we understand.
-		 */
-		val = zen_iodie_read(iodie, enreg);
-		if (FCH_PMIO_ALTMMIOEN_GET_EN(val) != 0) {
-			cmn_err(CE_WARN, "primary FCH has alternate MMIO "
-			    "base address set; ignoring");
-			return (0);
-		}
-
-		is_primary = B_TRUE;
-	}
-
-	ioml = zen_fabric_gen_subsume(ioms, ZIR_GEN_LEGACY);
-	mmml = zen_fabric_gen_subsume(ioms, ZIR_GEN_MMIO);
-
-	mlcount = memlist_count(ioml) + memlist_count(mmml);
-
-	if (mlcount == 0) {
-		cmn_err(CE_WARN, "FCH: empty resource memlist");
-		return (0);
-	}
-
-	switch (chiprev_fch_kind(cpuid_getchiprev(CPU))) {
-	case FK_TAISHAN:
-		ident = "taishan";
-		break;
-	case FK_HUASHAN:
-		ident = "huashan";
-		break;
-	case FK_SONGSHAN:
-		ident = "songshan";
-		break;
-	case FK_KUNLUN:
-		ident = "kunlun";
-		break;
-	default:
-		/* There may be an FCH but we don't know what it is. */
-		return (0);
-	}
-
-	ndi_devi_alloc_sleep(ddi_root_node(), ident, (pnode_t)DEVI_SID_NODEID,
-	    &dip);
-
-	frp = kmem_zalloc(sizeof (fch_rangespec_t) * mlcount, KM_SLEEP);
-
-	rangecount = memlist_to_ranges(ioml, frp, FA_LEGACY);
-	rangecount += memlist_to_ranges(mmml, frp + rangecount, FA_MMIO);
-
-	/*
-	 * At this point, frp/rangecount describes this FCH's notional parent's
-	 * available resources not already consumed by PCI.  If this FCH is the
-	 * primary one, it will in fact be given the entirety of these
-	 * resources, although it doesn't necessarily decode all of them.  The
-	 * secondary FCHs are a bit more difficult: they can decode only what we
-	 * program into their MMIO BAR, which in present implementations will
-	 * support only children consuming the FCH::MISC register space.  In
-	 * this case we must find a suitable region, set up the BAR, and adjust
-	 * the ranges to reflect what the FCH can see.  We would love to put
-	 * this thing in 64-bit space but we cannot because while the BAR has a
-	 * 64-bit option, setting it puts the region at 0xffff_ffff_XXXX_0000,
-	 * an address this CPU cannot generate.  Sometimes all you can do is
-	 * laugh.
-	 *
-	 * XXX At the moment, we create only a single MMIO range (corresponding
-	 * to the value we program in the BAR) for secondary FCHs.  However, it
-	 * is possible to route legacy I/O to a secondary FCH and in turn to
-	 * allocate that (variable) space to children just as a PCI bridge does.
-	 * When we want to use such a child, we will need to improve this.  See
-	 * also fch_parent_base() above.
-	 */
-	if (!is_primary) {
-		for (uint_t ridx = 0; ridx < rangecount; ridx++) {
-			uint32_t val;
-			uint64_t addr, size, end;
-
-			if (frp[ridx].fr_addrsp != FA_MMIO)
-				continue;
-			if (frp[ridx].fr_physhi != 0)
-				continue;
-			size = fch_rangespec_size(frp + ridx);
-
-			/*
-			 * We need a 16-bit-aligned space 8K in size.  If this
-			 * range contains such a space, set up the FCH's BAR to
-			 * point at it and then throw away all the other ranges
-			 * as we cannot use them.
-			 */
-			addr = fch_rangespec_addr(frp + ridx);
-			end = addr + (size - 1);
-			addr = P2ROUNDUP_TYPED(addr,
-			    (1UL << FCH_PMIO_ALTMMIOBASE_SHIFT), uint64_t);
-
-			if (addr + (FCH_PMIO_ALTMMIOBASE_SIZE - 1) > end)
-				continue;
-
-			/*
-			 * XXX Here, we would instead have used busra to
-			 * allocate this space from the parent if our parent
-			 * existed.  It doesn't, so we don't have anywhere to
-			 * record that the rest of the space is still available.
-			 * At present, there are no other possible consumers, so
-			 * we simply throw it all away.
-			 */
-			ufrp = frp + ridx;
-			usable_rangecount = 1;
-
-			ufrp->fr_physlo = (uint32_t)addr;
-			ufrp->fr_sizelo = FCH_PMIO_ALTMMIOBASE_SIZE;
-
-			val = zen_iodie_read(iodie, enreg);
-			if (FCH_PMIO_ALTMMIOEN_GET_EN(val) != 0) {
-				val = FCH_PMIO_ALTMMIOEN_SET_EN(val, 0);
-				zen_iodie_write(iodie, enreg, val);
-			}
-
-			val = zen_iodie_read(iodie, bar);
-			val = FCH_PMIO_ALTMMIOBASE_SET(val,
-			    (uint32_t)addr >> FCH_PMIO_ALTMMIOBASE_SHIFT);
-			zen_iodie_write(iodie, bar, val);
-
-			val = FCH_PMIO_ALTMMIOEN_SET_EN(0, 1);
-			val = FCH_PMIO_ALTMMIOEN_SET_WIDTH(val,
-			    FCH_PMIO_ALTMMIOEN_WIDTH_32);
-			zen_iodie_write(iodie, enreg, val);
-
-			break;
-		}
-	} else {
-		ufrp = frp;
-		usable_rangecount = rangecount;
-	}
-
-	if (ufrp == NULL || usable_rangecount == 0) {
-		cmn_err(CE_WARN, "FCH: no resources available");
-		goto fail;
-	}
-
-	if (ndi_prop_update_int_array(DDI_DEV_T_NONE, dip, FCH_PROPNAME_RANGES,
-	    (int *)ufrp, usable_rangecount * INTS_PER_RANGESPEC) !=
-	    NDI_SUCCESS) {
-		cmn_err(CE_WARN, "FCH: failed to update '%s'",
-		    FCH_PROPNAME_RANGES);
-		goto fail;
-	}
-
-	if (ndi_prop_update_string(DDI_DEV_T_NONE, dip,
-	    FCH_PROPNAME_FABRIC_ROLE, is_primary ? FCH_FABRIC_ROLE_PRI :
-	    FCH_FABRIC_ROLE_SEC) != NDI_SUCCESS) {
-		cmn_err(CE_WARN, "FCH: failed to update '%s'",
-		    FCH_PROPNAME_FABRIC_ROLE);
-		goto fail;
-	}
-
-	/*
-	 * Set this FCH's "reg" property.  This is faked up using the legacy
-	 * 3x32-bit format that impl_sunbus_name_child() expects, so that this
-	 * FCH will end up with a unit address containing the parent IO die's
-	 * nodeid.  For the primary die on socket 0, this is always "0".  The
-	 * FCH's children include our console device and likely other devices
-	 * that may be needed during boot, so it's important that we not rely on
-	 * instance numbers when opening a device by pathname.  Thus not only do
-	 * all our children have deterministic hardware-derived names, so do we.
-	 *
-	 * We do have real registers we'd like to be able to map, which follow
-	 * the first artificial one.  We need them only for the ixbar on the
-	 * primary FCH, which doesn't belong here anyway, but the concept of
-	 * having our own registers is still generally reasonable.
-	 *
-	 * XXX Again: setting our name really belongs in our parent's ctl_ops so
-	 * that we wouldn't need to rely on the legacy behaviour of
-	 * impl_sunbus_name_child()'s interpretation of our "reg" property!
-	 */
-	reg[0] = 0;
-	reg[1] = zen_iodie_node_id(iodie);
-	reg[2] = 0;
-
-	if (is_primary) {
-		reg[3] = 1;	/* legacy I/O */
-		reg[4] = FCH_IXBAR_IDX;
-		reg[5] = FCH_IXBAR_DATA - FCH_IXBAR_IDX + 1;
-	}
-
-	if (ndi_prop_update_int_array(DDI_DEV_T_NONE, dip, FCH_PROPNAME_REG,
-	    (int *)reg, ARRAY_SIZE(reg)) != NDI_SUCCESS) {
-		cmn_err(CE_WARN, "FCH: failed to update '%s'",
-		    FCH_PROPNAME_REG);
-		goto fail;
-	}
-
-	if (ndi_ra_map_setup(dip, NDI_RA_TYPE_IO) != NDI_SUCCESS) {
-		cmn_err(CE_WARN, "FCH: failed to setup legacy I/O map");
-		goto fail;
-	}
-	if (ndi_ra_map_setup(dip, NDI_RA_TYPE_MEM) != NDI_SUCCESS) {
-		cmn_err(CE_WARN, "FCH: failed to setup MMIO map");
-		(void) ndi_ra_map_destroy(dip, NDI_RA_TYPE_MEM);
-		goto fail;
-	}
-
-	for (uint_t ridx = 0; ridx < usable_rangecount; ridx++) {
-		uint64_t addr, size;
-
-		addr = fch_rangespec_addr(ufrp + ridx);
-		size = fch_rangespec_size(ufrp + ridx);
-		res = ndi_ra_free(dip, addr, size,
-		    fch_rangespec_to_ndi_ra_type(ufrp + ridx), 0);
-		VERIFY3S(res, ==, NDI_SUCCESS);
-	}
-
-	/*
-	 * Reserve our own registers so we don't accidentally hand them out to
-	 * one of our children.
-	 */
-	for (uint_t ridx = 0; ridx < ARRAY_SIZE(reg) / INTS_PER_REGSPEC;
-	    ridx++) {
-		bzero(&rr, sizeof (rr));
-		rr.ra_flags = NDI_RA_ALLOC_SPECIFIED;
-		rr.ra_len = reg[ridx * INTS_PER_REGSPEC + 2];
-		rr.ra_addr = reg[ridx * INTS_PER_REGSPEC + 1];
-		if (rr.ra_len == 0)
-			continue;
-		if (ndi_ra_alloc(dip, &rr, &rr_base, &rr_len,
-		    (reg[ridx * INTS_PER_REGSPEC] == 0 ? NDI_RA_TYPE_MEM :
-		    NDI_RA_TYPE_IO), 0) != NDI_SUCCESS) {
-			cmn_err(CE_WARN, "FCH: failed to reserve registers");
-			goto fail;
-		}
-	}
-
-	if (ndi_devi_bind_driver(dip, 0) == NDI_SUCCESS) {
-		goto done;
-	}
-
-fail:
-	if (dip != NULL) {
-		(void) ndi_ra_map_destroy(dip, NDI_RA_TYPE_IO);
-		(void) ndi_ra_map_destroy(dip, NDI_RA_TYPE_MEM);
-		(void) ndi_devi_free(dip);
-	}
-
-done:
-	if (frp != NULL) {
-		kmem_free(frp, sizeof (fch_rangespec_t) * mlcount);
-	}
-	return (0);
-}
-
-static void
-fch_enumerate(int reprobe)
-{
-	if (reprobe)
-		return;
-
-	(void) zen_walk_ioms(fch_ioms_cb, NULL);
-}
-
 int
 _init(void)
 {
@@ -2934,7 +2550,6 @@ _init(void)
 	err = ddi_soft_state_init(&fch_state, sizeof (fch_t), 2);
 	VERIFY0(err);
 
-	impl_bus_add_probe(fch_enumerate);
 	return (0);
 }
 
@@ -2947,6 +2562,5 @@ _info(struct modinfo *modinfop)
 int
 _fini(void)
 {
-	impl_bus_delete_probe(fch_enumerate);
 	return (mod_remove(&fch_modlinkage));
 }

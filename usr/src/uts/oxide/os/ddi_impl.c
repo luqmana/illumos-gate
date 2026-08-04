@@ -2211,20 +2211,16 @@ impl_bus_initialprobe(void)
 
 	/*
 	 * XXX What remains of this mechanism ought to go away as well.  The
-	 * df and ioms nexi are already created by their parents' bus_config
-	 * ops (rootnex's and df's, respectively, driven from configure()),
-	 * which is the model everything here should follow: the fch probe
-	 * belongs in ioms's bus_config, as does the PCI enumeration, at which
-	 * point this function, the probe list, and these modloads can all be
-	 * deleted.  There is no chicken-and-egg reason for any of this to
-	 * happen before configure() -- nothing consumes the nodes these
-	 * probes create until well after that -- the mechanism is simply
-	 * inherited from i86pc.
+	 * df, ioms, and fch nexi are already created by their parents'
+	 * bus_config ops (rootnex's, df's, and ioms's, respectively, driven
+	 * from configure()), which is the model the one remaining probe
+	 * should follow: the PCI enumeration belongs in ioms's bus_config, at
+	 * which point this function, the probe list, and this modload can all
+	 * be deleted.  There is no chicken-and-egg reason for any of this to
+	 * happen before configure() -- nothing consumes the nodes this probe
+	 * creates until well after that -- the mechanism is simply inherited
+	 * from i86pc.
 	 */
-	if (modload("drv", "fch") < 0) {
-		panic("failed to load drv/fch");
-	}
-
 	if (modload("misc", "pci_autoconfig") < 0) {
 		panic("failed to load misc/pci_autoconfig");
 	}

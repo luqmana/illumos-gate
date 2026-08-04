@@ -10,15 +10,17 @@
  */
 
 /*
- * Copyright 2022 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
-#ifndef _FCH_PROPS_H
-#define	_FCH_PROPS_H
+#ifndef _SYS_IO_FCH_PROPS_H
+#define	_SYS_IO_FCH_PROPS_H
 
 /*
- * This header is private to fch(4D) and its children. It contains common
- * properties that they both share.
+ * Properties shared between fch(4D), the parent nexus that creates its device
+ * node, and its children.  The parent tells the FCH whether it is the primary
+ * one (decoding the fixed legacy/compatibility address space) or a secondary
+ * one (decoding only a small relocatable window) via the fabric-role property.
  */
 
 #ifdef __cplusplus
@@ -33,4 +35,4 @@ extern "C" {
 }
 #endif
 
-#endif /* _FCH_PROPS_H */
+#endif /* _SYS_IO_FCH_PROPS_H */

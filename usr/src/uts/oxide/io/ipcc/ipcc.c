@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -32,6 +32,7 @@
 #include <sys/errno.h>
 #include <sys/espi_impl.h>
 #include <sys/file.h>
+#include <sys/param.h>
 #include <sys/platform_detect.h>
 #include <sys/policy.h>
 #include <sys/sdt.h>
@@ -47,6 +48,7 @@
 #include <sys/termios.h>
 #include <sys/types.h>
 #include <sys/gpio/dpio.h>
+#include <sys/io/zen/fch.h>
 
 #include <sys/ipcc.h>
 #include <sys/ipcc_proto.h>
@@ -848,9 +850,9 @@ ipcc_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	char *path;
 	const struct {
 		const char *impl;
-		const char *path;
+		const char *suffix;
 	} path_lookup[] = {
-		{ "Oxide,Gimlet", "/devices/huashan@0,0/dwu@1:0,cu", },
+		{ "Oxide,Gimlet", "/dwu@1:0,cu", },
 	};
 
 	switch (cmd) {
@@ -937,14 +939,19 @@ ipcc_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 			ddi_prop_free(path);
 		} else {
 			const char *impl = ddi_node_name(ddi_root_node());
+			char fch_path[TYPICALMAXPATHLEN];
+			size_t len;
+
+			len = fch_dev_path(fch_path, sizeof (fch_path));
 
 			for (uint_t i = 0; i < ARRAY_SIZE(path_lookup); i++) {
-				if (strcmp(impl, path_lookup[i].impl) == 0) {
-					ipcc_path =
-					    ddi_strdup(path_lookup[i].path,
-					    KM_SLEEP);
+				if (strcmp(impl, path_lookup[i].impl) != 0)
+					continue;
+				if (len == 0 || len >= sizeof (fch_path))
 					break;
-				}
+				ipcc_path = kmem_asprintf("/devices%s%s",
+				    fch_path, path_lookup[i].suffix);
+				break;
 			}
 			if (ipcc_path == NULL) {
 				dev_err(dip, CE_WARN,

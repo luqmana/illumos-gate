@@ -76,6 +76,18 @@ typedef struct zen_ioms_memlists {
 	struct memlist		*zim_pmem_used;
 	struct memlist		*zim_bus_avail;
 	struct memlist		*zim_bus_used;
+
+	/*
+	 * The generic (non-PCI) resources that have been permanently granted
+	 * to the device tree via zen_fabric_gen_grant().  The transfer out of
+	 * the available pools above is destructive and happens only once, so
+	 * the grant is recorded here -- in fabric-owned storage that outlives
+	 * any driver soft state -- allowing the granting nexus to recover it
+	 * on a subsequent attach.
+	 */
+	bool			zim_gen_granted;
+	struct memlist		*zim_io_gen_grant;
+	struct memlist		*zim_mmio_gen_grant;
 } zen_ioms_memlists_t;
 
 /*

@@ -21,7 +21,7 @@
 
 /*
  * Copyright (c) 2012 Gary Mills
- * Copyright 2024 Oxide Computer Co.
+ * Copyright 2026 Oxide Computer Co.
  *
  * Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
@@ -40,10 +40,7 @@
 #include <sys/ddi_impldefs.h>
 #include <sys/promif.h>
 #include <sys/modctl.h>
-#include <sys/cpuvar.h>
-#include <sys/x86_archext.h>
-
-#include <sys/amdzen/fch.h>
+#include <sys/io/zen/fch.h>
 
 int
 plat_use_polled_debug()
@@ -87,20 +84,32 @@ plat_kbdpath(void)
 	return (NULL);
 }
 
+/*
+ * The path returned by plat_conspath() is expected to be of static
+ * (or otherwise unbounded) lifetime, so we store it in a static buffer.  The
+ * contents are deterministically derived from the fabric topology and are
+ * filled on the first call, made from the single-threaded console configuration
+ * during boot, and only ever read thereafter.
+ */
+static char plat_console_path[TYPICALMAXPATHLEN];
+
 static char *
 plat_conspath(void)
 {
-	switch (chiprev_fch_kind(cpuid_getchiprev(CPU))) {
-	case FK_HUASHAN:
-		return ("/huashan@0,0/dwu@0:0");
-	case FK_SONGSHAN:
-		return ("/songshan@0,0/dwu@0:0");
-	case FK_KUNLUN:
-		return ("/kunlun@0,0/dwu@0:0");
-	case FK_NONE:
-	default:
-		panic("plat_conspath: unsupported FCH type");
-	}
+	size_t sz;
+
+	if (plat_console_path[0] != '\0')
+		return (plat_console_path);
+
+	sz = fch_dev_path(plat_console_path, sizeof (plat_console_path));
+	if (sz == 0 || sz >= sizeof (plat_console_path))
+		panic("plat_conspath: no usable primary FCH device path");
+
+	sz = strlcat(plat_console_path, "/dwu@0:0", sizeof (plat_console_path));
+	if (sz >= sizeof (plat_console_path))
+		panic("plat_conspath: console path too long");
+
+	return (plat_console_path);
 }
 
 char *

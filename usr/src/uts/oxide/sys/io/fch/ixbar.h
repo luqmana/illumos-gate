@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2022 Oxide Computer Co.
+ * Copyright 2026 Oxide Computer Co.
  */
 
 #ifndef _SYS_IO_FCH_IXBAR_H
@@ -38,6 +38,14 @@ extern "C" {
 /* FCH::IO::PCI_INTR_{INDEX,DATA}. */
 #define	FCH_IXBAR_IDX	0xc00
 #define	FCH_IXBAR_DATA	0xc01
+
+/*
+ * Index of the ixbar registers in the fch(4D) node's "reg" property.  This is
+ * a contract between the parent nexus that creates the node and describes
+ * these registers there (see ioms_config_fch()) and fch_ixbar_setup(), which
+ * maps them by this register number.
+ */
+#define	FCH_IXBAR_RNUM	0
 
 #ifndef	_ASM
 

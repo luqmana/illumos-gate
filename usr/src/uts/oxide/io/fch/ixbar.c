@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2022 Oxide Computer Co.
+ * Copyright 2026 Oxide Computer Co.
  */
 
 /*
@@ -335,8 +335,8 @@ fch_ixbar_setup(dev_info_t *dip)
 	 */
 	ixp->fix_npins = 24;
 
-	if (ddi_regs_map_setup(dip, 1, (caddr_t *)&ixp->fix_reg, 0, 0,
-	    &reg_attr, &ixp->fix_reg_hdl) != DDI_SUCCESS) {
+	if (ddi_regs_map_setup(dip, FCH_IXBAR_RNUM, (caddr_t *)&ixp->fix_reg,
+	    0, 0, &reg_attr, &ixp->fix_reg_hdl) != DDI_SUCCESS) {
 		dev_err(dip, CE_WARN, "mapping ixbar registers failed");
 		kmem_free(ixp, sizeof (fch_ixbar_t));
 		return (NULL);

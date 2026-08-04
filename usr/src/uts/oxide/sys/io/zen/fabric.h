@@ -167,6 +167,12 @@ extern uint16_t zen_iodie_node_id(const zen_iodie_t *const);
 extern zen_iodie_flag_t zen_iodie_flags(const zen_iodie_t *const);
 
 /*
+ * Provides the node ID and IOMS number of the primary FCH.  If no primary FCH
+ * is found, returns false and leaves the output arguments unmodified.
+ */
+extern bool zen_fabric_primary_fch(uint16_t *node_id, uint8_t *ioms_num);
+
+/*
  * The entry point for early boot which intializes the general fabric
  * topology.
  */
@@ -192,17 +198,20 @@ extern uint64_t zen_fabric_ecam_base(void);
  * Given a PCI resource type and a PCI bus number, transfers unallocated
  * resources of that type from an IOMS root port to PCI, returning a memlist
  * with the transferred resources.  Returns NULL if no resources are available.
- * For things that are not PCI, use zen_fabric_gen_subsume, instead.
+ * For things that are not PCI, use zen_fabric_gen_grant, instead.
  */
 extern struct memlist *zen_fabric_pci_subsume(uint32_t, pci_prd_rsrc_t);
 
 /*
- * Given an IOMS instance and a resource type, transfers available resources of
- * that type to and returns a new memlist.  Returns NULL if no such resources
- * are available.  This is intended for things that are not PCI, such as legacy
- * IO and MMIO spaces; for PCI use zen_fabric_pci_subsume.
+ * Returns the generic (non-PCI) legacy I/O and MMIO resources routed by the
+ * given IOMS, transferring them out of the fabric's available pools on the
+ * first call and returning the same recorded grant on any subsequent one.
+ * The returned memlists are owned by the fabric and stable for the lifetime
+ * of the system; callers must not modify or free them.  Either may be NULL if
+ * no resources of that type are available.
  */
-extern struct memlist *zen_fabric_gen_subsume(zen_ioms_t *, zen_ioms_rsrc_t);
+extern void zen_fabric_gen_grant(zen_ioms_t *, const struct memlist **,
+    const struct memlist **);
 
 /*
  * Enable the NMI functionality in the IOHC to allow external devices (i.e., the

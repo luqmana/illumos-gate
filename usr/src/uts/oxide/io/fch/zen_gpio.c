@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -36,7 +36,7 @@
 #include <sys/gpio/kgpio_provider.h>
 
 #include "amdzen_data.h"
-#include "fch_props.h"
+#include <sys/io/fch/props.h>
 
 typedef enum {
 	/*
