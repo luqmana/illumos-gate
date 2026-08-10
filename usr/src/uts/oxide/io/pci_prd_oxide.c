@@ -178,6 +178,20 @@ pci_prd_fini(void)
 
 }
 
+/*
+ * Boot-time PCI enumeration walks devices that, on a PC, may need errata
+ * worked around, may keep registers somewhere other than where their base
+ * address registers say, or may want nodes of their own created.  None of
+ * that applies here: this architecture's devices are described by the fabric
+ * and behave as PCI Express says they should, so we have nothing to add as
+ * enumeration goes past them.
+ */
+const struct pci_boot_ops *
+pci_prd_boot_ops(void)
+{
+	return (NULL);
+}
+
 typedef struct pci_prd_rc_iter {
 	pci_prd_root_complex_f	pri_func;
 	void			*pri_arg;

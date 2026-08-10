@@ -25,6 +25,7 @@
 #
 # Copyright (c) 2018, Joyent, Inc.
 # Copyright 2019 OmniOS Community Edition (OmniOSce) Association.
+# Copyright 2026 Oxide Computer Company
 #
 #	This makefile drives the production of the ISA nexus driver
 #
@@ -64,7 +65,7 @@ CFLAGS += $(CCVERBOSE)
 
 #
 #       Dependency
-LDFLAGS         += -Nmisc/acpica -Nmisc/busra -Nmisc/pci_autoconfig
+LDFLAGS         += -Nmisc/acpica -Nmisc/busra -Nmisc/pci_boot
 
 #
 # Define our version of dma_engine and i8237A interfaces

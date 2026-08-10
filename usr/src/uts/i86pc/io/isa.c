@@ -22,7 +22,7 @@
  * Copyright 2014 Garrett D'Amore <garrett@damore.org>
  * Copyright (c) 2012 Gary Mills
  * Copyright (c) 1992, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright 2023 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -48,6 +48,7 @@
 #include <sys/acpi/acpi_enum.h>
 #include <sys/mach_intr.h>
 #include <sys/pci.h>
+#include <sys/pci_boot.h>
 #include <sys/note.h>
 #include <sys/boot_console.h>
 #include <sys/apic.h>
@@ -63,7 +64,6 @@ extern int pseudo_isa;
 extern int isa_resource_setup(void);
 extern int (*psm_intr_ops)(dev_info_t *, ddi_intr_handle_impl_t *,
     psm_intr_op_t, int *);
-extern void pci_register_isa_resources(int, uint32_t, uint32_t);
 static void isa_enumerate(int);
 static void enumerate_BIOS_serial(dev_info_t *);
 static void adjust_prtsz(dev_info_t *isa_dip);

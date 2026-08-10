@@ -14,39 +14,39 @@
 #
 
 #
-# Path to the base of the uts directory tree (usually /usr/src/uts).
+#	This makefile drives the production of the boot-time PCI enumeration
+#	kernel module.
+#
+#	intel platform dependent
+#
+
+#
+#	Path to the base of the uts directory tree (usually /usr/src/uts).
 #
 UTSBASE	= ../..
 
 #
-# Define the module and object file sets.
+#	Define the module and object file sets.
 #
-MODULE		= pci_prd
-OBJECTS		= $(PCI_PRD_OBJS:%=$(OBJS_DIR)/%)
-ROOTMODULE	= $(ROOT_PSM_MISC_DIR)/$(MODULE)
+MODULE		= pci_boot
+OBJECTS		= $(PCI_BOOT_OBJS:%=$(OBJS_DIR)/%)
+ROOTMODULE	= $(ROOT_MISC_DIR)/$(MODULE)
 
 #
-# Include common rules.
+#	Include common rules.
 #
-include $(UTSBASE)/i86pc/Makefile.i86pc
+include $(UTSBASE)/intel/Makefile.intel
 
 #
-# Define targets
+#	Define targets
 #
 ALL_TARGET	= $(BINARY)
 INSTALL_TARGET	= $(BINARY) $(ROOTMODULE)
 
-LDFLAGS		+= -Nmisc/acpica -Nmisc/pcie
-
 #
-# Overrides
+# Depends on the platform's resource discovery and PCI-E framework
 #
-
-ALL_BUILDS	= $(ALL_BUILDSONLY64)
-DEF_BUILDS	= $(DEF_BUILDSONLY64)
-
-$(OBJS_DIR)/pci_prd_i86pc.o := CFLAGS += -_gcc14=--param=min-pagesize=0
-$(OBJS_DIR)/pci_prd_i86pc.o := CFLAGS += -_gcc15=--param=min-pagesize=0
+LDFLAGS		+= -Nmisc/pcie -Nmisc/pci_prd
 
 #
 #	Default build targets.
@@ -66,4 +66,4 @@ install:	$(INSTALL_DEPS)
 #
 #	Include common targets.
 #
-include $(UTSBASE)/i86pc/Makefile.targ
+include $(UTSBASE)/intel/Makefile.targ

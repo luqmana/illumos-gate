@@ -25,6 +25,7 @@
 # Use is subject to license terms.
 #
 # Copyright (c) 2018, Joyent, Inc.
+# Copyright 2026 Oxide Computer Company
 
 #
 #	This file makes the pcmcia nexus for an intel system
@@ -62,7 +63,7 @@ INC_PATH        += -I$(UTSBASE)/i86pc
 #
 #	dependency
 #
-LDFLAGS	+=	-Nmisc/busra -Nmisc/pci_autoconfig
+LDFLAGS	+=	-Nmisc/busra
 
 #
 # For now, disable these warnings; maintainers should endeavor

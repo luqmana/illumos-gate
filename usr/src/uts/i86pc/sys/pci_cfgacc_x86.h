@@ -23,11 +23,14 @@
  * Use is subject to license terms.
  *
  * Copyright 2020 OmniOS Community Edition (OmniOSce) Association.
+ * Copyright 2026 Oxide Computer Company
  *
  */
 
 #ifndef	_SYS_PCI_CFGACC_X86_H
 #define	_SYS_PCI_CFGACC_X86_H
+
+#include <sys/types.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -39,11 +42,6 @@ extern "C" {
 #define	AMD_AM_NTBRIDGE_DID		0x1101	/* Address Map */
 #define	AMD_DC_NTBRIDGE_DID		0x1102	/* DRAM Controller */
 #define	AMD_MC_NTBRIDGE_DID		0x1103	/* Misc Controller */
-#define	AMD_K10_NTBRIDGE_DID_0		0x1200
-#define	AMD_K10_NTBRIDGE_DID_1		0x1201
-#define	AMD_K10_NTBRIDGE_DID_2		0x1202
-#define	AMD_K10_NTBRIDGE_DID_3		0x1203
-#define	AMD_K10_NTBRIDGE_DID_4		0x1204
 
 /* AMD's 8132 chipset vendor-id and device-ids */
 #define	AMD_8132_BRIDGE_DID		0x7458	/* 8132 PCI-X bridge */
@@ -59,24 +57,15 @@ extern "C" {
 	    ((did) == AMD_DC_NTBRIDGE_DID) || \
 	    ((did) == AMD_MC_NTBRIDGE_DID)))
 
-#define	IS_K10_AMD_NTBRIDGE(vid, did) \
-	    (((vid) == AMD_NTBRDIGE_VID) && \
-	    (((did) == AMD_K10_NTBRIDGE_DID_0) || \
-	    ((did) == AMD_K10_NTBRIDGE_DID_1) || \
-	    ((did) == AMD_K10_NTBRIDGE_DID_2) || \
-	    ((did) == AMD_K10_NTBRIDGE_DID_3) || \
-	    ((did) == AMD_K10_NTBRIDGE_DID_4)))
-
 #define	IS_AMD_8132_CHIP(vid, did) \
 	    (((vid) == AMD_NTBRDIGE_VID) && \
 	    (((did) == AMD_8132_BRIDGE_DID) || \
 	    ((did) == AMD_8132_IOAPIC_DID)))
 
-#define	MSR_AMD_NB_MMIO_CFG_BADDR	0xc0010058
-#define	AMD_MMIO_CFG_BADDR_ADDR_MASK	0xFFFFFFF00000ULL
-#define	AMD_MMIO_CFG_BADDR_ENA_MASK	0x000000000001ULL
-#define	AMD_MMIO_CFG_BADDR_ENA_ON	0x000000000001ULL
-#define	AMD_MMIO_CFG_BADDR_ENA_OFF	0x000000000000ULL
+/*
+ * Note a bad device which doesn't support MMIO config space access.
+ */
+extern void pci_cfgacc_add_workaround(uint16_t, uchar_t, uchar_t);
 
 #ifdef	__cplusplus
 }

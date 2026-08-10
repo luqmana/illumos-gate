@@ -45,6 +45,7 @@
 #include <sys/types.h>
 #include <sys/memlist.h>
 #include <sys/sunddi.h>
+#include <sys/pci_props.h>
 #include <sys/pcie_impl.h>
 #include <io/pciex/pcie_ltssm.h>
 #include <io/pciex/pcie_eq.h>
@@ -63,11 +64,38 @@ typedef enum pci_prd_rsrc {
 	PCI_PRD_R_BUS
 } pci_prd_rsrc_t;
 
+/*
+ * Some devices have to be interfered with before enumeration can safely get
+ * past them at all (e.g., an erratum that makes merely looking at other devices
+ * hazardous, say) and put back the way they were once enumeration is over.
+ * A platform describes each such fix as a pair of functions, registered
+ * through the pru_register_fix_f upcall below.
+ *
+ * A fix is offered every device function found on the machine, before any of
+ * them have been otherwise touched and in no particular order, along with the
+ * properties read from it. It returns whether it did anything to that function,
+ * and so whether its partner will need to be run against it later. Enumeration
+ * keeps that record, and once it is finished with the state the fixes
+ * established, unwinds it in reverse.  A fix that never needs undoing may
+ * register no partner, in which case what it returns does not matter.
+ */
+typedef boolean_t (*pci_prd_fix_f)(uint8_t, uint8_t, uint8_t,
+    const pci_prop_data_t *);
+typedef void (*pci_prd_unfix_f)(uint8_t, uint8_t, uint8_t);
+
 typedef struct pci_prd_upcalls {
 	/*
 	 * Return a dev_info_t, if one exists, for this PCI bus.
 	 */
 	dev_info_t *(*pru_bus2dip_f)(uint32_t);
+	/*
+	 * Register a fix, and, optionally, the means of undoing it, to be
+	 * applied before enumeration proper begins. A platform with nothing to
+	 * fix registers nothing. Fixes must be registered before enumeration
+	 * starts, which in practice means from pci_prd_init(), and remain
+	 * registered for as long as the platform module is loaded.
+	 */
+	void (*pru_register_fix_f)(pci_prd_fix_f, pci_prd_unfix_f);
 } pci_prd_upcalls_t;
 
 /*
@@ -167,6 +195,20 @@ extern int pci_prd_pcie_set_preset_mask(dev_info_t *, pcie_link_speed_t,
  * slot.
  */
 extern void pci_prd_slot_name(uint32_t, dev_info_t *);
+
+/*
+ * Return the operations that boot-time PCI enumeration should call out to as
+ * it walks each device, or NULL if this platform has nothing to say about the
+ * devices it will find. These cover the things enumeration cannot discover:
+ * chipset errata to work around, devices whose registers are not where their
+ * base address registers say they are, address space decoded by convention
+ * rather than by any register, and device nodes the platform wants created
+ * for what is found.
+ *
+ * The operations themselves are described in <sys/pci_boot.h>.
+ */
+struct pci_boot_ops;
+extern const struct pci_boot_ops *pci_prd_boot_ops(void);
 
 /*
  * These are a series of flags that indicate how certain compatibility options

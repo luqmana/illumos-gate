@@ -24,6 +24,7 @@
 # Use is subject to license terms.
 #
 # Copyright 2016 Joyent, Inc.
+# Copyright 2026 Oxide Computer Company
 #
 
 #
@@ -56,7 +57,7 @@ ALL_TARGET	= $(BINARY)
 INSTALL_TARGET	= $(BINARY) $(ROOTMODULE)
 
 #
-# depends on misc/pci_autoconfig misc/pcihp
+# depends on misc/pcihp
 #
 LDFLAGS		+= -Nmisc/pcihp
 

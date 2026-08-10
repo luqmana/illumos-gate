@@ -25,6 +25,7 @@
 #
 # Copyright 2016 Joyent, Inc.
 # Copyright 2020 OmniOS Community Edition (OmniOSce) Association.
+# Copyright 2026 Oxide Computer Company
 #
 #	This makefile drives the production of the PCI autoconfiguration
 #	kernel module.
@@ -57,9 +58,10 @@ ALL_TARGET	= $(BINARY)
 INSTALL_TARGET	= $(BINARY) $(ROOTMODULE)
 
 #
-# Depends on the platform's resource discovery and PCI-E framework
+# Depends on the enumeration library it drives and on the platform's resource
+# discovery, which it consults for the maximum bus number to enumerate.
 #
-LDFLAGS		+= -Nmisc/pcie -Nmisc/pci_prd
+LDFLAGS		+= -Nmisc/pci_boot -Nmisc/pci_prd
 
 #
 #	Default build targets.

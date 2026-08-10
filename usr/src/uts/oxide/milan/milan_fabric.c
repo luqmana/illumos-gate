@@ -275,7 +275,7 @@
  * typically but not necessarily an "OS" like i86pc illumos.  For reasons of
  * expediency, we've taken a similar approach here, but it's not necessary to do
  * so, and some notes on possible future work may be found below.  This allows
- * us to reuse the pci_autoconfig (one-shot enumeration and resource assignment
+ * us to reuse the pci_boot (one-shot enumeration and resource assignment
  * at boot) and pciehp (hotplug controller management and runtime enumeration
  * and resource assignment) code already available for PCs.  That code isn't
  * really as generic as one might imagine; it makes a number of significant

@@ -616,6 +616,7 @@ MISC_KMODS	+= nfs_dlboot
 MISC_KMODS	+= nfssrv
 MISC_KMODS	+= neti
 MISC_KMODS	+= pci_autoconfig
+MISC_KMODS	+= pci_boot
 MISC_KMODS	+= pcicfg
 MISC_KMODS	+= pcihp
 MISC_KMODS	+= pcmcia

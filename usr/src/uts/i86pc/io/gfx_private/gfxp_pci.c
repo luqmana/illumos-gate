@@ -23,6 +23,9 @@
  * Copyright 2005 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
+/*
+ * Copyright 2026 Oxide Computer Company
+ */
 
 #include <sys/debug.h>
 #include <sys/types.h>
@@ -77,7 +80,7 @@ typedef struct gfxp_pci_bsf {
 	dev_info_t	*dip;
 } gfxp_pci_bsf_t;
 
-/* The use of pci_get?/put?_func() depends on misc/pci_autoconfig */
+/* pci_get?/put?_func() are set by pci_cfgspace_init() in the base kernel */
 
 static int
 gfxp_pci_get_bsf(dev_info_t *dip, uint8_t *bus, uint8_t *dev, uint8_t *func)
@@ -87,11 +90,10 @@ gfxp_pci_get_bsf(dev_info_t *dip, uint8_t *bus, uint8_t *dev, uint8_t *func)
 	int	rc;
 
 	/* get "reg" property */
-	rc = ddi_prop_lookup_int_array(DDI_DEV_T_ANY, dip,
-		DDI_PROP_DONTPASS, "reg", (int **)&pci_rp,
-		(uint_t *)&length);
-	if ((rc != DDI_SUCCESS) || (length <
-			(sizeof (pci_regspec_t) / sizeof (int)))) {
+	rc = ddi_prop_lookup_int_array(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
+	    "reg", (int **)&pci_rp, (uint_t *)&length);
+	if ((rc != DDI_SUCCESS) ||
+	    (length < (sizeof (pci_regspec_t) / sizeof (int)))) {
 		return (DDI_FAILURE);
 	}
 
@@ -120,11 +122,11 @@ gfxp_pci_find_bsf(dev_info_t *dip, void *arg)
 	 * this is some type of PCI child node.
 	 */
 	vendor_id = ddi_prop_get_int(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
-				"vendor-id", -1);
+	    "vendor-id", -1);
 	device_id = ddi_prop_get_int(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
-				"device-id", -1);
+	    "device-id", -1);
 	class_code = ddi_prop_get_int(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
-				"class-code", -1);
+	    "class-code", -1);
 	if ((vendor_id == -1) || (device_id == -1) || (class_code == -1)) {
 		return (DDI_WALK_CONTINUE);
 	}
@@ -135,7 +137,7 @@ gfxp_pci_find_bsf(dev_info_t *dip, void *arg)
 	pci_bsf = (gfxp_pci_bsf_t *)arg;
 
 	if ((bus == pci_bsf->bus) && (dev == pci_bsf->slot) &&
-		(func == pci_bsf->function)) {
+	    (func == pci_bsf->function)) {
 		pci_bsf->dip = dip;
 		pci_bsf->vendor = vendor_id;
 		pci_bsf->device = device_id;
@@ -150,7 +152,7 @@ gfxp_pci_find_bsf(dev_info_t *dip, void *arg)
 
 gfxp_acc_handle_t
 gfxp_pci_init_handle(uint8_t bus, uint8_t slot, uint8_t function,
-	uint16_t *vendor, uint16_t *device)
+    uint16_t *vendor, uint16_t *device)
 {
 	dev_info_t	*dip;
 	gfxp_pci_bsf_t	*pci_bsf;
@@ -162,7 +164,7 @@ gfxp_pci_init_handle(uint8_t bus, uint8_t slot, uint8_t function,
 	 */
 
 	if ((pci_bsf = kmem_zalloc(sizeof (gfxp_pci_bsf_t), KM_SLEEP))
-			== NULL) {
+	    == NULL) {
 		return (NULL);
 	}
 
@@ -210,7 +212,7 @@ gfxp_pci_read_word(gfxp_acc_handle_t handle, uint16_t offset)
 {
 	dev_info_t	*dip = (dev_info_t *)handle;
 	uint16_t	val;
-	uint8_t 	bus, dev, func;
+	uint8_t	bus, dev, func;
 
 	if (dip == NULL)
 		return ((uint16_t)~0);
@@ -296,11 +298,11 @@ gfxp_pci_find_vd(dev_info_t *dip, void *arg)
 	 * this is some type of PCI child node.
 	 */
 	vendor_id = ddi_prop_get_int(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
-			"vendor-id", -1);
+	    "vendor-id", -1);
 	device_id = ddi_prop_get_int(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
-			"device-id", -1);
+	    "device-id", -1);
 	class_code = ddi_prop_get_int(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
-			"class-code", -1);
+	    "class-code", -1);
 	if ((vendor_id == -1) || (device_id == -1) || (class_code == -1)) {
 		return (DDI_WALK_CONTINUE);
 	}
@@ -328,7 +330,7 @@ gfxp_pci_device_present(uint16_t vendor, uint16_t device)
 	 */
 
 	if ((pci_bsf = kmem_zalloc(sizeof (gfxp_pci_bsf_t), KM_SLEEP)) == NULL)
-	    return (0);
+		return (0);
 
 	pci_bsf->vendor = vendor;
 	pci_bsf->device = device;

@@ -21,7 +21,7 @@
 /*
  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
- * Copyright 2022 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -29,32 +29,34 @@
  */
 
 #include <sys/types.h>
-#include <sys/sunddi.h>
-#include <sys/pci_impl.h>
 #include <sys/ddi_subrdefs.h>
-#include <sys/bootconf.h>
-#include <sys/psw.h>
-#include <sys/modctl.h>
 #include <sys/errno.h>
-#include <sys/pci.h>
-#include <sys/pci_cfgspace.h>
-#include <sys/reboot.h>
-#include <sys/pci_cfgspace_impl.h>
-#include <sys/mutex.h>
+#include <sys/modctl.h>
+#include <sys/pci_boot.h>
 #include <sys/plat/pci_prd.h>
 
-extern int pci_boot_debug;
-extern int pci_boot_maxbus;
+uint_t pci_autoconfig_detach = 0;
 
 /*
- * Interface routines
+ * This function is invoked twice: first time, with reprogram=0 to
+ * set up the PCI portion of the device tree. The second time is
+ * for reprogramming devices not set up by the BIOS.
  */
-void pci_enumerate(int);
-void pci_setup_tree(void);
-void pci_reprogram(void);
-dev_info_t *pci_boot_bus_to_dip(uint32_t);
+void
+pci_enumerate(int reprogram)
+{
+	add_pci_fixes();
 
-uint_t pci_autoconfig_detach = 0;
+	if (reprogram) {
+		pci_reprogram();
+		undo_pci_fixes();
+		return;
+	}
+
+	/* setup device tree */
+	pci_setup_tree();
+	undo_pci_fixes();
+}
 
 static struct modlmisc modlmisc = {
 	&mod_miscops, "PCI BIOS interface"
@@ -64,21 +66,12 @@ static struct modlinkage modlinkage = {
 	MODREV_1, (void *)&modlmisc, NULL
 };
 
-static pci_prd_upcalls_t pci_upcalls = {
-	.pru_bus2dip_f = pci_boot_bus_to_dip
-};
-
 int
 _init(void)
 {
 	int	err;
 
-	if ((err = pci_prd_init(&pci_upcalls)) != 0) {
-		return (err);
-	}
-
 	if ((err = mod_install(&modlinkage)) != 0) {
-		pci_prd_fini();
 		return (err);
 	}
 
@@ -102,7 +95,6 @@ _fini(void)
 		return (err);
 
 	impl_bus_delete_probe(pci_enumerate);
-	pci_prd_fini();
 	return (0);
 }
 
@@ -110,37 +102,4 @@ int
 _info(struct modinfo *modinfop)
 {
 	return (mod_info(&modlinkage, modinfop));
-}
-
-
-/*
- * This function is invoked twice: first time, with reprogram=0 to
- * set up the PCI portion of the device tree. The second time is
- * for reprogramming devices not set up by the BIOS.
- */
-void
-pci_enumerate(int reprogram)
-{
-	extern void add_pci_fixes(void);
-	extern void undo_pci_fixes(void);
-
-	/*
-	 * On our first pass through here actually determine what the maximum
-	 * bus that we should use is.
-	 */
-	if (reprogram == 0) {
-		pci_boot_maxbus = pci_prd_max_bus();
-	}
-
-	add_pci_fixes();
-
-	if (reprogram) {
-		pci_reprogram();
-		undo_pci_fixes();
-		return;
-	}
-
-	/* setup device tree */
-	pci_setup_tree();
-	undo_pci_fixes();
 }

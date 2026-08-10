@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2024 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -52,12 +52,6 @@
 #include <sys/sysmacros.h>
 #include <sys/io/zen/ccx.h>
 #include <sys/io/zen/fabric.h>
-
-/*
- * XXX This section contains variables that the rest of the system expects to
- * have. Their needs should be re-evaluated as we go.
- */
-int pci_bios_maxbus = 0xff;
 
 /*
  * These function pointers are entry points that the system has historically
@@ -307,16 +301,6 @@ pcie_cfgspace_write_uint64(int bus, int dev, int func, int reg, uint64_t val)
 
 	u64p = (uint64_t *)pcie_bdfr_to_addr(bus, dev, func, reg);
 	__asm__ __volatile__("movq	%1, %0\n" : "=m" (*u64p) : "a" (val) :);
-}
-
-/*
- * The following function is a stub that is expected to exist due to
- * support for older platforms from the old pci_cfgacc_x86.c. Because we don't
- * have the old systems with a broken AMD ECS, we can just make these simple.
- */
-void
-pci_cfgacc_add_workaround(uint16_t bdf, uchar_t secbus, uchar_t subbus)
-{
 }
 
 /*

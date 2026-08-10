@@ -22,7 +22,7 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2019 Joyent, Inc.
- * Copyright 2024 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -238,7 +238,7 @@ pci_check(void)
 	/*
 	 * Try to get a valid mcfg_mem_base in early boot
 	 * If failed, leave mem-mapped pci config space accessing disabled
-	 * until pci boot code (pci_autoconfig) makes sure this is a PCIE
+	 * until pci boot code (pci_boot) makes sure this is a PCIE
 	 * platform.
 	 */
 	if (do_bsys_getprop(NULL, MCFG_PROPNAME, ecfginfo) != -1) {

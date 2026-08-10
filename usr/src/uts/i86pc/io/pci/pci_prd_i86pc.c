@@ -35,6 +35,10 @@
  * is partly why the PRD interface has a callback for getting information about
  * a dev_info_t. It also means we cannot initialize the tables with information
  * until all devices have been initially scanned.
+ *
+ * Additionally, the boot-time PCI enumeration (misc/pci_boot in uts/intel) is
+ * generic so any PC-specific errata or legacy behavior only applicable on i86pc
+ * is also defined here.
  */
 
 #include <sys/types.h>
@@ -43,7 +47,20 @@
 #include <sys/pci.h>
 #include <sys/pci_impl.h>
 #include <sys/pci_cfgspace_impl.h>
+#include <sys/apic.h>
+#include <sys/apic_common.h>
+#include <sys/bootconf.h>
+#include <sys/iommulib.h>
+#include <sys/kmem.h>
+#include <sys/pci_boot.h>
+#include <sys/pci_cfgacc.h>
+#include <sys/pci_cfgacc_x86.h>
+#include <sys/pci_cfgspace.h>
+#include <sys/pci_props.h>
+#include <sys/pcie_impl.h>
 #include <sys/sunndi.h>
+#include <sys/sysmacros.h>
+#include <io/pciex/pcie_nvidia.h>
 #include <sys/systm.h>
 #include <sys/cmn_err.h>
 #include <sys/acpi/acpi.h>
@@ -57,6 +74,16 @@ extern int pci_bios_maxbus;
 int pci_prd_debug = 0;
 #define	dprintf	if (pci_prd_debug) printf
 #define	dcmn_err	if (pci_prd_debug != 0) cmn_err
+
+#define	pci_getb	(*pci_getb_func)
+#define	pci_getw	(*pci_getw_func)
+#define	pci_getl	(*pci_getl_func)
+#define	pci_putb	(*pci_putb_func)
+
+/* See AMD-8111 Datasheet Rev 3.03, Page 149: */
+#define	LPC_IO_CONTROL_REG_1	0x40
+#define	AMD8111_ENABLENMI	(uint8_t)0x80
+#define	DEVID_AMD8111_LPC	0x7468
 
 static int tbl_init = 0;
 static uchar_t *mps_extp = NULL;
@@ -72,6 +99,7 @@ static int mps_find_bus_res(uint32_t, pci_prd_rsrc_t, struct memlist **);
 static void hrt_probe(void);
 static int hrt_find_bus_res(uint32_t, pci_prd_rsrc_t, struct memlist **);
 static size_t acpi_find_bus_res(uint32_t, pci_prd_rsrc_t, struct memlist **);
+static int legacy_find_bus0_res(pci_prd_rsrc_t, struct memlist **);
 static uchar_t *find_sig(uchar_t *cp, int len, char *sig);
 static int checksum(unsigned char *cp, int len);
 static ACPI_STATUS acpi_wr_cb(ACPI_RESOURCE *rp, void *context);
@@ -98,6 +126,43 @@ static boolean_t pci_prd_have_bios = B_TRUE;
  * This value is set up as part of PCI configuration space initialization.
  */
 extern int pci_bios_maxbus;
+
+/*
+ * i86pc-specific boot-time PCI enumeration hooks.
+ */
+static void pci_prd_i86pc_devinit(dev_info_t *dip, uint8_t bus, uint8_t dev,
+    uint8_t func, const pci_prop_data_t *prop);
+static void pci_prd_i86pc_devdone(dev_info_t *dip, uint8_t bus, uint8_t dev,
+    uint8_t func, const pci_prop_data_t *prop);
+static boolean_t pci_prd_i86pc_claim(dev_info_t *dip, uint8_t bus, uint8_t dev,
+    uint8_t func, const pci_prop_data_t *prop);
+static void pci_prd_i86pc_claimed(dev_info_t *dip, uint8_t bus, uint8_t dev,
+    uint8_t func, const pci_prop_data_t *prop);
+static boolean_t pci_prd_i86pc_io_bar(dev_info_t *dip, uint8_t bus, uint8_t dev,
+    uint8_t func, uint_t bar, uint32_t *basep, uint_t *lenp,
+    boolean_t *hard_decodep);
+static uint_t pci_prd_i86pc_aliases(uint8_t bus, uint8_t dev, uint8_t func,
+    pci_boot_region_t *alias, uint_t nmax);
+static boolean_t pci_prd_i86pc_legacy_range(uint64_t base, uint64_t len,
+    boolean_t io);
+static uint_t pci_prd_i86pc_bridge_regions(uint8_t bus, uint8_t dev,
+    uint8_t func, pci_boot_region_t *ranges, uint_t nmax);
+static boolean_t pci_prd_i86pc_apply_amd8111_fix(uint8_t bus, uint8_t dev,
+    uint8_t fn, const pci_prop_data_t *prop);
+static void pci_prd_i86pc_undo_amd8111_fix(uint8_t bus, uint8_t dev,
+    uint8_t fn);
+
+static const pci_boot_ops_t pci_prd_i86pc_boot_ops = {
+	.pbo_devinit_f = pci_prd_i86pc_devinit,
+	.pbo_devdone_f = pci_prd_i86pc_devdone,
+	.pbo_claim_f = pci_prd_i86pc_claim,
+	.pbo_claimed_f = pci_prd_i86pc_claimed,
+	.pbo_io_bar_f = pci_prd_i86pc_io_bar,
+	.pbo_aliases_f = pci_prd_i86pc_aliases,
+	.pbo_legacy_range_f = pci_prd_i86pc_legacy_range,
+	.pbo_bridge_regions_f = pci_prd_i86pc_bridge_regions
+};
+
 
 static void
 acpi_pci_probe(void)
@@ -661,6 +726,40 @@ pci_prd_max_bus(void)
 	return ((uint32_t)pci_bios_maxbus);
 }
 
+/*
+ * What a PC's bus 0 may be assumed to route when none of the firmware tables
+ * describe it.  This is the source of last resort, consulted only once the
+ * others have come up empty, and it speaks only for bus 0.
+ *
+ * Unlike the tables above, whose lists we own and hand out as they are, both
+ * answers here are freshly built for the caller to keep: the boot memlist
+ * belongs to the boot subsystem and must not be given away.
+ */
+static int
+legacy_find_bus0_res(pci_prd_rsrc_t rsrc, struct memlist **res)
+{
+	switch (rsrc) {
+	case PCI_PRD_R_MMIO:
+		/*
+		 * Whatever the boot loader noted as possibly available for
+		 * PCI MMIO.
+		 */
+		*res = pci_memlist_dup(bootops->boot_mem->pcimem);
+		break;
+	case PCI_PRD_R_IO:
+		/*
+		 * For I/O space [0x0,0xFFFF], the assumption is that the
+		 * first 256 bytes [0x00,0xFF] are reserved for the system.
+		 */
+		pci_memlist_insert(res, 0x100, 0xff00);
+		break;
+	default:
+		return (0);
+	}
+
+	return (memlist_count(*res));
+}
+
 struct memlist *
 pci_prd_find_resource(uint32_t bus, pci_prd_rsrc_t rsrc)
 {
@@ -686,6 +785,10 @@ pci_prd_find_resource(uint32_t bus, pci_prd_rsrc_t rsrc)
 
 	if (pci_prd_have_bios)
 		(void) mps_find_bus_res(bus, rsrc, &res);
+
+	if (res == NULL && bus == 0)
+		(void) legacy_find_bus0_res(rsrc, &res);
+
 	return (res);
 }
 
@@ -859,6 +962,14 @@ pci_prd_init(pci_prd_upcalls_t *upcalls)
 
 	prd_upcalls = upcalls;
 
+	/*
+	 * The 8111's NMI-on-error behaviour has to be turned off before we go
+	 * looking at anything else on the machine, and turned back on once we
+	 * are done; see pci_prd_i86pc_apply_amd8111_fix().
+	 */
+	upcalls->pru_register_fix_f(pci_prd_i86pc_apply_amd8111_fix,
+	    pci_prd_i86pc_undo_amd8111_fix);
+
 	return (0);
 }
 
@@ -903,6 +1014,598 @@ pci_prd_fini(void)
 		pci_memlist_free_all(&acpi_pmem_res[bus]);
 		pci_memlist_free_all(&acpi_bus_res[bus]);
 	}
+}
+
+const struct pci_boot_ops *
+pci_prd_boot_ops(void)
+{
+	return (&pci_prd_i86pc_boot_ops);
+}
+
+static void
+pci_prd_i86pc_undo_amd8111_fix(uint8_t bus, uint8_t dev, uint8_t fn)
+{
+	uint8_t val8;
+
+	val8 = pci_getb(bus, dev, fn, LPC_IO_CONTROL_REG_1);
+	/*
+	 * The NMIONERR bit is turned back on to allow the SMM BIOS
+	 * to handle more critical PCI errors (e.g. PERR#).
+	 */
+	val8 |= AMD8111_ENABLENMI;
+	pci_putb(bus, dev, fn, LPC_IO_CONTROL_REG_1, val8);
+}
+
+static boolean_t
+pci_prd_i86pc_apply_amd8111_fix(uint8_t bus, uint8_t dev, uint8_t fn,
+    const pci_prop_data_t *prop)
+{
+	uint8_t val8;
+
+	if (prop->ppd_vendid != VENID_AMD ||
+	    prop->ppd_devid != DEVID_AMD8111_LPC) {
+		return (B_FALSE);
+	}
+
+	val8 = pci_getb(bus, dev, fn, LPC_IO_CONTROL_REG_1);
+
+	if ((val8 & AMD8111_ENABLENMI) == 0)
+		return (B_FALSE);
+
+	/*
+	 * We reset NMIONERR in the LPC because master-abort on the PCI
+	 * bridge side of the 8111 will cause NMI, which might cause SMI,
+	 * which sometimes prevents all devices from being enumerated.
+	 */
+	val8 &= ~AMD8111_ENABLENMI;
+
+	pci_putb(bus, dev, fn, LPC_IO_CONTROL_REG_1, val8);
+
+	return (B_TRUE);
+}
+
+/*
+ * Enable reporting of AER capability next pointer.
+ * This needs to be done only for CK8-04 devices
+ * by setting NV_XVR_VEND_CYA1 (offset 0xf40) bit 13
+ * NOTE: BIOS is disabling this, it needs to be enabled temporarily
+ *
+ * This function is adapted from npe_ck804_fix_aer_ptr().
+ */
+static void
+ck804_fix_aer_ptr(dev_info_t *dip, pcie_req_id_t bdf)
+{
+	dev_info_t *rcdip;
+	ushort_t cya1;
+
+	rcdip = pcie_get_rc_dip(dip);
+	if (rcdip == NULL)
+		return;
+
+	if ((pci_cfgacc_get16(rcdip, bdf, PCI_CONF_VENID) ==
+	    NVIDIA_VENDOR_ID) &&
+	    (pci_cfgacc_get16(rcdip, bdf, PCI_CONF_DEVID) ==
+	    NVIDIA_CK804_DEVICE_ID) &&
+	    (pci_cfgacc_get8(rcdip, bdf, PCI_CONF_REVID) >=
+	    NVIDIA_CK804_AER_VALID_REVID)) {
+		cya1 = pci_cfgacc_get16(rcdip, bdf, NVIDIA_CK804_VEND_CYA1_OFF);
+		if (!(cya1 & ~NVIDIA_CK804_VEND_CYA1_ERPT_MASK))
+			(void) pci_cfgacc_put16(rcdip, bdf,
+			    NVIDIA_CK804_VEND_CYA1_OFF,
+			    cya1 | NVIDIA_CK804_VEND_CYA1_ERPT_VAL);
+	}
+}
+
+static void
+create_ioapic_node(int bus, int dev, int fn, ushort_t vendorid,
+    ushort_t deviceid)
+{
+	static dev_info_t *ioapicsnode = NULL;
+	static int numioapics = 0;
+	dev_info_t *ioapic_node;
+	uint64_t physaddr;
+	uint32_t lobase, hibase = 0;
+
+	/* BAR 0 contains the IOAPIC's memory-mapped I/O address */
+	lobase = pci_getl(bus, dev, fn, PCI_CONF_BASE0);
+
+	/* We (and the rest of the world) only support memory-mapped IOAPICs */
+	if ((lobase & PCI_BASE_SPACE_M) != PCI_BASE_SPACE_MEM)
+		return;
+
+	if ((lobase & PCI_BASE_TYPE_M) == PCI_BASE_TYPE_ALL)
+		hibase = pci_getl(bus, dev, fn, PCI_CONF_BASE0 + 4);
+
+	lobase &= PCI_BASE_M_ADDR_M;
+
+	physaddr = (((uint64_t)hibase) << 32) | lobase;
+
+	/*
+	 * Create a nexus node for all IOAPICs under the root node.
+	 */
+	if (ioapicsnode == NULL) {
+		if (ndi_devi_alloc(ddi_root_node(), IOAPICS_NODE_NAME,
+		    (pnode_t)DEVI_SID_NODEID, &ioapicsnode) != NDI_SUCCESS) {
+			return;
+		}
+		(void) ndi_devi_online(ioapicsnode, 0);
+	}
+
+	/*
+	 * Create a child node for this IOAPIC
+	 */
+	ioapic_node = ddi_add_child(ioapicsnode, IOAPICS_CHILD_NAME,
+	    DEVI_SID_NODEID, numioapics++);
+	if (ioapic_node == NULL) {
+		return;
+	}
+
+	/* Vendor and Device ID */
+	(void) ndi_prop_update_int(DDI_DEV_T_NONE, ioapic_node,
+	    IOAPICS_PROP_VENID, vendorid);
+	(void) ndi_prop_update_int(DDI_DEV_T_NONE, ioapic_node,
+	    IOAPICS_PROP_DEVID, deviceid);
+
+	/* device_type */
+	(void) ndi_prop_update_string(DDI_DEV_T_NONE, ioapic_node,
+	    "device_type", IOAPICS_DEV_TYPE);
+
+	/* reg */
+	(void) ndi_prop_update_int64(DDI_DEV_T_NONE, ioapic_node,
+	    "reg", physaddr);
+}
+
+/*
+ * add_nvidia_isa_bridge_props():
+ *	To enable native hotplug; we need to map in two I/O BARs
+ *	from ISA bridge's config space
+ *
+ * NOTE: For now, this function is only used for Nvidia's CrushK 8-04 chipsets.
+ */
+static void
+add_nvidia_isa_bridge_props(dev_info_t *dip, uchar_t bus, uchar_t dev,
+    uchar_t func)
+{
+	uint_t devloc, base;
+	pci_regspec_t regs[2] = {{0}};
+	pci_regspec_t assigned[2] = {{0}};
+
+	devloc = PCI_REG_MAKE_BDFR(bus, dev, func, 0);
+	regs[0].pci_phys_hi = devloc;
+
+	/* System Control BAR i/o space */
+	base = pci_getl(bus, dev, func, NVIDIA_CK804_ISA_SYSCTRL_BAR_OFF);
+	regs[0].pci_size_low = assigned[0].pci_size_low = PCI_CONF_HDR_SIZE;
+	assigned[0].pci_phys_hi = regs[0].pci_phys_hi = (PCI_RELOCAT_B |
+	    PCI_ADDR_IO | devloc | NVIDIA_CK804_ISA_SYSCTRL_BAR_OFF);
+	assigned[0].pci_phys_low = regs[0].pci_phys_low =
+	    base & PCI_BASE_IO_ADDR_M;
+
+	/* Analog BAR i/o space */
+	base = pci_getl(bus, dev, func, NVIDIA_CK804_ISA_ANALOG_BAR_OFF);
+	regs[1].pci_size_low = assigned[1].pci_size_low = PCI_CONF_HDR_SIZE;
+	assigned[1].pci_phys_hi = regs[1].pci_phys_hi = (PCI_RELOCAT_B |
+	    PCI_ADDR_IO | devloc | NVIDIA_CK804_ISA_ANALOG_BAR_OFF);
+	assigned[1].pci_phys_low = regs[1].pci_phys_low =
+	    base & PCI_BASE_IO_ADDR_M;
+
+	(void) ndi_prop_update_int_array(DDI_DEV_T_NONE, dip, "reg",
+	    (int *)regs, 2 * sizeof (pci_regspec_t) / sizeof (int));
+	(void) ndi_prop_update_int_array(DDI_DEV_T_NONE, dip,
+	    "assigned-addresses",
+	    (int *)assigned, 2 * sizeof (pci_regspec_t) / sizeof (int));
+}
+
+/*
+ * As a workaround for devices which is_pciide() would not match due to device
+ * issues, check an undocumented device tree property 'pci-ide', the value of
+ * which is a 1275 device identifier.
+ *
+ * Should a device matching this (in normal 'compatible' order) be found, and
+ * the device not otherwise bound, it will have its node name changed to
+ * 'pci-ide' so the pci-ide driver will attach.
+ *
+ * This can be set via `eeprom pci-ide=pciXXXX,YYYY` (see eeprom(8)) or
+ * otherwise added to bootenv.rc.
+ */
+static boolean_t
+check_pciide_prop(uchar_t revid, ushort_t venid, ushort_t devid,
+    ushort_t subvenid, ushort_t subdevid)
+{
+	static int prop_exist = -1;
+	static char *pciide_str;
+	char compat[32];
+
+	if (prop_exist == -1) {
+		prop_exist = (ddi_prop_lookup_string(DDI_DEV_T_ANY,
+		    ddi_root_node(), DDI_PROP_DONTPASS, "pci-ide",
+		    &pciide_str) == DDI_SUCCESS);
+	}
+
+	if (!prop_exist)
+		return (B_FALSE);
+
+	/* compare property value against various forms of compatible */
+	if (subvenid) {
+		(void) snprintf(compat, sizeof (compat), "pci%x,%x.%x.%x.%x",
+		    venid, devid, subvenid, subdevid, revid);
+		if (strcmp(pciide_str, compat) == 0)
+			return (B_TRUE);
+
+		(void) snprintf(compat, sizeof (compat), "pci%x,%x.%x.%x",
+		    venid, devid, subvenid, subdevid);
+		if (strcmp(pciide_str, compat) == 0)
+			return (B_TRUE);
+
+		(void) snprintf(compat, sizeof (compat), "pci%x,%x",
+		    subvenid, subdevid);
+		if (strcmp(pciide_str, compat) == 0)
+			return (B_TRUE);
+	}
+	(void) snprintf(compat, sizeof (compat), "pci%x,%x.%x",
+	    venid, devid, revid);
+	if (strcmp(pciide_str, compat) == 0)
+		return (B_TRUE);
+
+	(void) snprintf(compat, sizeof (compat), "pci%x,%x", venid, devid);
+	if (strcmp(pciide_str, compat) == 0)
+		return (B_TRUE);
+
+	return (B_FALSE);
+}
+
+static boolean_t
+is_pciide(const pci_prop_data_t *prop)
+{
+	struct ide_table {
+		ushort_t venid;
+		ushort_t devid;
+	};
+
+	/*
+	 * Devices which need to be matched specially as pci-ide because of
+	 * various device issues.  Commonly their specification as being
+	 * PCI_MASS_OTHER or PCI_MASS_SATA despite our using them in ATA mode.
+	 */
+	static struct ide_table ide_other[] = {
+		{0x1095, 0x3112}, /* Silicon Image 3112 SATALink/SATARaid */
+		{0x1095, 0x3114}, /* Silicon Image 3114 SATALink/SATARaid */
+		{0x1095, 0x3512}, /* Silicon Image 3512 SATALink/SATARaid */
+		{0x1095, 0x680},  /* Silicon Image PCI0680 Ultra ATA-133 */
+		{0x1283, 0x8211} /* Integrated Technology Express 8211F */
+	};
+
+	if (prop->ppd_class != PCI_CLASS_MASS)
+		return (B_FALSE);
+
+	if (prop->ppd_subclass == PCI_MASS_IDE) {
+		return (B_TRUE);
+	}
+
+	if (check_pciide_prop(prop->ppd_rev, prop->ppd_vendid,
+	    prop->ppd_devid, prop->ppd_subvid, prop->ppd_subsys)) {
+		return (B_TRUE);
+	}
+
+	if (prop->ppd_subclass != PCI_MASS_OTHER &&
+	    prop->ppd_subclass != PCI_MASS_SATA) {
+		return (B_FALSE);
+	}
+
+	for (size_t i = 0; i < ARRAY_SIZE(ide_other); i++) {
+		if (ide_other[i].venid == prop->ppd_vendid &&
+		    ide_other[i].devid == prop->ppd_devid)
+			return (B_TRUE);
+	}
+	return (B_FALSE);
+}
+
+/*
+ * config info for pci-ide devices
+ */
+static struct {
+	uchar_t  native_mask;	/* 0 == 'compatibility' mode, 1 == native */
+	uchar_t  bar_offset;	/* offset for alt status register */
+	ushort_t addr;		/* compatibility mode base address */
+	ushort_t length;	/* number of ports for this BAR */
+} pciide_bar[] = {
+	{ 0x01, 0, 0x1f0, 8 },	/* primary lower BAR */
+	{ 0x01, 2, 0x3f6, 1 },	/* primary upper BAR */
+	{ 0x04, 0, 0x170, 8 },	/* secondary lower BAR */
+	{ 0x04, 2, 0x376, 1 }	/* secondary upper BAR */
+};
+
+static boolean_t
+pciide_adjust_bar(uchar_t progcl, uint_t bar, uint_t *basep, uint_t *lenp)
+{
+	boolean_t hard_decode = B_FALSE;
+
+	/*
+	 * Adjust the base and len for the BARs of the PCI-IDE
+	 * device's primary and secondary controllers. The first
+	 * two BARs are for the primary controller and the next
+	 * two BARs are for the secondary controller. The fifth
+	 * and sixth bars are never adjusted.
+	 */
+	if (bar <= 3) {
+		*lenp = pciide_bar[bar].length;
+
+		if (progcl & pciide_bar[bar].native_mask) {
+			*basep += pciide_bar[bar].bar_offset;
+		} else {
+			*basep = pciide_bar[bar].addr;
+			hard_decode = B_TRUE;
+		}
+	}
+
+	/*
+	 * if either base or len is zero make certain both are zero
+	 */
+	if (*basep == 0 || *lenp == 0) {
+		*basep = 0;
+		*lenp = 0;
+		hard_decode = B_FALSE;
+	}
+
+	return (hard_decode);
+}
+
+/*
+ * A device is a legacy IDE controller if it says so, or if it is one of the
+ * devices known not to say so correctly.  Such a controller in compatibility
+ * mode decodes the fixed ATA task file ports rather than the ones its base
+ * address registers name, which is what the three hooks below are for.
+ */
+static boolean_t
+pci_prd_i86pc_claim(dev_info_t *dip, uint8_t bus __unused, uint8_t dev
+    __unused, uint8_t func __unused, const pci_prop_data_t *prop)
+{
+	if (!is_pciide(prop))
+		return (B_FALSE);
+
+	/*
+	 * If some driver of higher precedence in driver_aliases will claim
+	 * the node, leave it alone: it is not ours to rename, and its
+	 * registers are whatever its base address registers say they are.
+	 */
+	if (ddi_compatible_driver_major(dip, NULL) != (major_t)-1)
+		return (B_FALSE);
+
+	(void) ndi_devi_set_nodename(dip, "pci-ide", 0);
+
+	return (B_TRUE);
+}
+
+static void
+pci_prd_i86pc_claimed(dev_info_t *dip, uint8_t bus __unused,
+    uint8_t dev __unused, uint8_t func __unused,
+    const pci_prop_data_t *prop)
+{
+	dev_info_t *cdip;
+
+	VERIFY(is_pciide(prop));
+	VERIFY(strcmp(ddi_node_name(dip), "pci-ide") == 0);
+
+	/*
+	 * Create properties specified by P1275 Working Group
+	 * Proposal #414 Version 1
+	 */
+	(void) ndi_prop_update_string(DDI_DEV_T_NONE, dip,
+	    "device_type", "pci-ide");
+	(void) ndi_prop_update_int(DDI_DEV_T_NONE, dip,
+	    "#address-cells", 1);
+	(void) ndi_prop_update_int(DDI_DEV_T_NONE, dip,
+	    "#size-cells", 0);
+
+	/* allocate two child nodes */
+	ndi_devi_alloc_sleep(dip, "ide", (pnode_t)DEVI_SID_NODEID, &cdip);
+	(void) ndi_prop_update_int(DDI_DEV_T_NONE, cdip, "reg", 0);
+	(void) ndi_devi_bind_driver(cdip, 0);
+	ndi_devi_alloc_sleep(dip, "ide", (pnode_t)DEVI_SID_NODEID, &cdip);
+	(void) ndi_prop_update_int(DDI_DEV_T_NONE, cdip, "reg", 1);
+	(void) ndi_devi_bind_driver(cdip, 0);
+}
+
+static boolean_t
+pci_prd_i86pc_io_bar(dev_info_t *dip, uint8_t bus, uint8_t dev, uint8_t func,
+    uint_t bar, uint32_t *basep, uint_t *lenp, boolean_t *hard_decodep)
+{
+	uint8_t subclass = pci_getb(bus, dev, func, PCI_CONF_SUBCLASS);
+	uint8_t progclass = pci_getb(bus, dev, func, PCI_CONF_PROGCLASS);
+	uint_t adjbase = *basep;
+
+	VERIFY(strcmp(ddi_node_name(dip), "pci-ide") == 0);
+
+	/*
+	 * Only the first four registers, which are the primary and secondary
+	 * controllers' pairs, are ours to describe.  The rest we leave alone
+	 * unless the device says they are I/O space, in which case we still
+	 * pass them through the adjustment below so that an empty register is
+	 * consistently reported as such.
+	 */
+	if (bar >= 4 && (*basep & PCI_BASE_SPACE_IO) == 0)
+		return (B_FALSE);
+
+	/*
+	 * A device we recognized in spite of its class needs to be treated as
+	 * though both of its channels were in native mode.
+	 */
+	if (subclass != PCI_MASS_IDE) {
+		progclass = (PCI_IDE_IF_NATIVE_PRI | PCI_IDE_IF_NATIVE_SEC);
+	}
+
+	*hard_decodep = pciide_adjust_bar(progclass, bar, &adjbase, lenp);
+	*basep = adjbase;
+
+	return (B_TRUE);
+}
+
+/*
+ * The regions a PC places at fixed addresses by convention: the legacy VGA
+ * ranges.  A video adapter decodes these in addition to its base address
+ * registers (see pci_prd_i86pc_aliases()), and a bridge told to forward VGA
+ * passes them to its secondary bus, so enumeration has to recognize them
+ * wherever they appear rather than treat them as space it may assign.
+ *
+ * The 8514 ranges are deliberately not here: they belong to the device that
+ * has them, and bridges do not forward them.
+ */
+static const pci_boot_region_t pci_prd_i86pc_vga_ranges[] = {
+	/* VGA hard decode 0x3b0-0x3bb */
+	{ .pbr_io = B_TRUE,  .pbr_base = 0x3b0,   .pbr_len = 0xc },
+	/* VGA hard decode 0x3c0-0x3df */
+	{ .pbr_io = B_TRUE,  .pbr_base = 0x3c0,   .pbr_len = 0x20 },
+	/* Video memory */
+	{ .pbr_io = B_FALSE, .pbr_base = 0xa0000, .pbr_len = 0x20000 }
+};
+
+/*
+ * A PC's video adapter decodes the legacy VGA addresses in addition to
+ * whatever its base address registers describe, and an 8514-compatible one
+ * decodes a further pair of legacy port ranges.  None of this is discoverable;
+ * it is what a PC has always done, so we tell enumeration about it.
+ */
+static uint_t
+pci_prd_i86pc_aliases(uint8_t bus, uint8_t dev, uint8_t func,
+    pci_boot_region_t *alias, uint_t nmax)
+{
+	uint8_t baseclass = pci_getb(bus, dev, func, PCI_CONF_BASCLASS);
+	uint8_t subclass = pci_getb(bus, dev, func, PCI_CONF_SUBCLASS);
+	uint8_t progclass = pci_getb(bus, dev, func, PCI_CONF_PROGCLASS);
+	uint_t n = 0;
+
+	if ((baseclass != PCI_CLASS_DISPLAY || subclass != PCI_DISPLAY_VGA) &&
+	    (baseclass != PCI_CLASS_NONE || subclass != PCI_NONE_VGA)) {
+		return (0);
+	}
+
+	n = ARRAY_SIZE(pci_prd_i86pc_vga_ranges);
+	VERIFY3U(n, <=, nmax);
+	bcopy(pci_prd_i86pc_vga_ranges, alias, sizeof (*alias) * n);
+
+	/* the hard-decode, aliased address spaces for 8514 */
+	if (baseclass == PCI_CLASS_DISPLAY && subclass == PCI_DISPLAY_VGA &&
+	    (progclass & PCI_DISPLAY_IF_8514) != 0) {
+		/* hard decode 0x2e8 */
+		VERIFY3U(n, <, nmax);
+		alias[n].pbr_io = B_TRUE;
+		alias[n].pbr_base = 0x2e8;
+		alias[n].pbr_len = 0x1;
+		n++;
+
+		/* hard decode 0x2ea-0x2ef */
+		VERIFY3U(n, <, nmax);
+		alias[n].pbr_io = B_TRUE;
+		alias[n].pbr_base = 0x2ea;
+		alias[n].pbr_len = 0x6;
+		n++;
+	}
+
+	return (n);
+}
+
+/*
+ * Applied as each function is enumerated, before anything reads its
+ * configuration space through the PCIe framework.
+ */
+static void
+pci_prd_i86pc_devinit(dev_info_t *dip, uint8_t bus, uint8_t dev, uint8_t func,
+    const pci_prop_data_t *prop)
+{
+	pcie_req_id_t bdf = PCI_GETBDF(bus, dev, func);
+
+	/*
+	 * Record BAD AMD bridges which don't support MMIO config access.
+	 */
+	if (IS_BAD_AMD_NTBRIDGE(prop->ppd_vendid, prop->ppd_devid) ||
+	    IS_AMD_8132_CHIP(prop->ppd_vendid, prop->ppd_devid)) {
+		uchar_t secbus = 0;
+		uchar_t subbus = 0;
+
+		if (pci_prop_class_is_pcibridge(prop)) {
+			secbus = pci_getb(bus, dev, func, PCI_BCNF_SECBUS);
+			subbus = pci_getb(bus, dev, func, PCI_BCNF_SUBBUS);
+		}
+		pci_cfgacc_add_workaround(bdf, secbus, subbus);
+	}
+
+	ck804_fix_aer_ptr(dip, bdf);
+}
+
+/*
+ * Applied once a function's device node has been fully populated.
+ */
+static void
+pci_prd_i86pc_devdone(dev_info_t *dip, uint8_t bus, uint8_t dev, uint8_t func,
+    const pci_prop_data_t *prop)
+{
+	if (pci_prop_class_is_ioapic(prop)) {
+		create_ioapic_node(bus, dev, func, prop->ppd_vendid,
+		    prop->ppd_devid);
+	}
+
+	/* check for NVIDIA CK8-04/MCP55 based LPC bridge */
+	if (NVIDIA_IS_LPC_BRIDGE(prop->ppd_vendid, prop->ppd_devid) &&
+	    dev == 1 && func == 0) {
+		add_nvidia_isa_bridge_props(dip, bus, dev, func);
+		/* each LPC bridge has an integrated IOAPIC */
+		apic_nvidia_io_max++;
+	}
+
+	/*
+	 * Remember the graphics devices we come across.  The AMD IOMMU driver
+	 * walks this list to find the devices whose translations it must set
+	 * up before the framebuffer console can be used.
+	 */
+	if (pci_prop_class_is_vga(prop)) {
+		gfx_entry_t *gfxp;
+
+		gfxp = kmem_zalloc(sizeof (*gfxp), KM_SLEEP);
+		gfxp->g_dip = dip;
+		gfxp->g_prev = NULL;
+		gfxp->g_next = gfx_devinfo_list;
+		gfx_devinfo_list = gfxp;
+		if (gfxp->g_next)
+			gfxp->g_next->g_prev = gfxp;
+	}
+}
+
+
+static boolean_t
+pci_prd_i86pc_legacy_range(uint64_t base, uint64_t len, boolean_t io)
+{
+	for (uint_t i = 0; i < ARRAY_SIZE(pci_prd_i86pc_vga_ranges); i++) {
+		const pci_boot_region_t *r = &pci_prd_i86pc_vga_ranges[i];
+
+		if (r->pbr_io == io && r->pbr_base == base &&
+		    r->pbr_len == len) {
+			return (B_TRUE);
+		}
+	}
+
+	return (B_FALSE);
+}
+
+/*
+ * A bridge with VGA forwarding enabled passes the legacy VGA ranges to its
+ * secondary bus whatever its windows say; every other bridge forwards
+ * nothing of the sort.
+ */
+static uint_t
+pci_prd_i86pc_bridge_regions(uint8_t bus, uint8_t dev, uint8_t func,
+    pci_boot_region_t *ranges, uint_t nmax)
+{
+	uint_t n = ARRAY_SIZE(pci_prd_i86pc_vga_ranges);
+
+	if ((pci_getw(bus, dev, func, PCI_BCNF_BCNTRL) &
+	    PCI_BCNF_BCNTRL_VGA_ENABLE) == 0) {
+		return (0);
+	}
+
+	VERIFY3U(n, <=, nmax);
+	bcopy(pci_prd_i86pc_vga_ranges, ranges, sizeof (*ranges) * n);
+
+	return (n);
 }
 
 static struct modlmisc pci_prd_modlmisc_i86pc = {

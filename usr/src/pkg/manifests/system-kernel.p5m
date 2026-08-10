@@ -29,6 +29,7 @@
 # Copyright 2019 Peter Tribble.
 # Copyright 2019 RackTop Systems
 # Copyright 2019 Joyent, Inc.
+# Copyright 2026 Oxide Computer Company
 #
 
 #
@@ -345,6 +346,7 @@ file path=kernel/misc/$(ARCH64)/mii group=sys mode=0755
 $(i386_ONLY)file path=kernel/misc/$(ARCH64)/net80211 group=sys mode=0755
 file path=kernel/misc/$(ARCH64)/neti group=sys mode=0755
 $(i386_ONLY)file path=kernel/misc/$(ARCH64)/pci_autoconfig group=sys mode=0755
+$(i386_ONLY)file path=kernel/misc/$(ARCH64)/pci_boot group=sys mode=0755
 $(i386_ONLY)file path=kernel/misc/$(ARCH64)/pcicfg group=sys mode=0755
 file path=kernel/misc/$(ARCH64)/pcihp group=sys mode=0755
 file path=kernel/misc/$(ARCH64)/pcmcia group=sys mode=0755

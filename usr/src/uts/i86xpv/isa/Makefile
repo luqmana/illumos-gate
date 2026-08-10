@@ -24,6 +24,7 @@
 # Use is subject to license terms.
 #
 # Copyright (c) 2018, Joyent, Inc.
+# Copyright 2026 Oxide Computer Company
 #
 #	This makefile drives the production of the ISA nexus driver
 #
@@ -69,7 +70,7 @@ CERRWARN	+= -_gcc=-Wno-unused-variable
 
 #
 #       Dependency
-LDFLAGS         += -Nmisc/acpica -Nmisc/busra -Nmisc/pci_autoconfig
+LDFLAGS         += -Nmisc/acpica -Nmisc/busra -Nmisc/pci_boot
 
 #
 # Define our version of dma_engine and i8237A interfaces

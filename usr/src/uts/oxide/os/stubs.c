@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2023 Oxide Computer Co
+ * Copyright 2026 Oxide Computer Co
  */
 
 #include <sys/types.h>
@@ -36,11 +36,6 @@
  * Used by openprom(4d) only.
  */
 char saved_cmdline[1] = "";
-
-/*
- * Used by pci_boot.c, which is really i86pc-specific.
- */
-int apic_nvidia_io_max = 0;
 
 void
 read_bootenvrc(void)

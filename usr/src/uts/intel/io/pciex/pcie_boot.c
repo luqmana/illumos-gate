@@ -21,31 +21,32 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright 2023 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
- *	Library file that has code for PCIe booting
+ * PCI Express discovery for boot-time PCI enumeration.
+ *
+ * Enumeration proceeds in terms of PCI, and needs to know which of the root
+ * buses it walks are in fact PCI Express root complexes so that it can say so
+ * on their device nodes.  There is no direct way to ask, so we look: a root
+ * bus is treated as PCI Express if any device beneath it has a PCI Express
+ * capability.
  */
 
 #include <sys/conf.h>
 #include <sys/pci.h>
+#include <sys/pci_boot.h>
 #include <sys/sunndi.h>
 #include <sys/pcie.h>
 #include <sys/pcie_impl.h>
 #include <sys/pci_cfgspace.h>
-#include <io/pciex/pcie_nvidia.h>
-
-/*
- * PCI Configuration (Nvidia chipsets, PCIe) related library functions
- */
+#include <io/pciex/pcie_boot.h>
 
 /* Globals */
-extern int pci_boot_debug;
-
 extern uint64_t mcfg_mem_base;
 
-boolean_t
+static boolean_t
 check_if_device_is_pciex(dev_info_t *cdip, uchar_t bus, uchar_t dev,
     uchar_t func, boolean_t *slot_valid, ushort_t *slot_number,
     ushort_t *is_pci_bridge)
@@ -115,7 +116,7 @@ check_if_device_is_pciex(dev_info_t *cdip, uchar_t bus, uchar_t dev,
  * PCI-Express device in the system.
  * If found, return B_TRUE else B_FALSE
  */
-boolean_t
+static boolean_t
 look_for_any_pciex_device(uchar_t bus)
 {
 	uchar_t dev, func;
@@ -185,48 +186,4 @@ create_pcie_root_bus(uchar_t bus, dev_info_t *dip)
 	pcie_rc_init_bus(dip);
 
 	return (B_TRUE);
-}
-
-
-/*
- * add_nvidia_isa_bridge_props():
- *	To enable native hotplug; we need to map in two I/O BARs
- *	from ISA bridge's config space
- *
- * NOTE: For now, this function is only used for Nvidia's CrushK 8-04 chipsets.
- */
-void
-add_nvidia_isa_bridge_props(dev_info_t *dip, uchar_t bus, uchar_t dev,
-    uchar_t func)
-{
-	uint_t devloc, base;
-	pci_regspec_t regs[2] = {{0}};
-	pci_regspec_t assigned[2] = {{0}};
-
-	devloc = PCI_REG_MAKE_BDFR(bus, dev, func, 0);
-	regs[0].pci_phys_hi = devloc;
-
-	/* System Control BAR i/o space */
-	base = (*pci_getl_func)(bus, dev, func,
-	    NVIDIA_CK804_ISA_SYSCTRL_BAR_OFF);
-	regs[0].pci_size_low = assigned[0].pci_size_low = PCI_CONF_HDR_SIZE;
-	assigned[0].pci_phys_hi = regs[0].pci_phys_hi = (PCI_RELOCAT_B |
-	    PCI_ADDR_IO | devloc | NVIDIA_CK804_ISA_SYSCTRL_BAR_OFF);
-	assigned[0].pci_phys_low = regs[0].pci_phys_low =
-	    base & PCI_BASE_IO_ADDR_M;
-
-	/* Analog BAR i/o space */
-	base = (*pci_getl_func)(bus, dev, func,
-	    NVIDIA_CK804_ISA_ANALOG_BAR_OFF);
-	regs[1].pci_size_low = assigned[1].pci_size_low = PCI_CONF_HDR_SIZE;
-	assigned[1].pci_phys_hi = regs[1].pci_phys_hi = (PCI_RELOCAT_B |
-	    PCI_ADDR_IO | devloc | NVIDIA_CK804_ISA_ANALOG_BAR_OFF);
-	assigned[1].pci_phys_low = regs[1].pci_phys_low =
-	    base & PCI_BASE_IO_ADDR_M;
-
-	(void) ndi_prop_update_int_array(DDI_DEV_T_NONE, dip, "reg",
-	    (int *)regs, 2 * sizeof (pci_regspec_t) / sizeof (int));
-	(void) ndi_prop_update_int_array(DDI_DEV_T_NONE, dip,
-	    "assigned-addresses",
-	    (int *)assigned, 2 * sizeof (pci_regspec_t) / sizeof (int));
 }

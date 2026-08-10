@@ -24,6 +24,7 @@
 # Use is subject to license terms.
 # Copyright 2015 Igor Kozhukhov <ikozhukhov@gmail.com>
 # Copyright 2019 OmniOS Community Edition (OmniOSce) Association.
+# Copyright 2026 Oxide Computer Company
 #
 
 #
@@ -43,11 +44,6 @@ OBJECTS		= $(GFX_PRIVATE_OBJS:%=$(OBJS_DIR)/%)
 ROOTMODULE	= $(ROOT_PSM_MISC_DIR)/$(MODULE)
 GFXP_VGATEXT	= gfxp_vgatext
 GFXP_VGATEXT_SRC	= $(UTSBASE)/i86pc/io/gfx_private
-
-#
-#	dependency
-#
-LDFLAGS	+=      -Nmisc/pci_autoconfig
 
 #
 #	Include common rules.

@@ -27,6 +27,7 @@
  * Copyright (c) 2010, Intel Corporation.
  * All rights reserved.
  * Copyright 2018 Joyent, Inc.
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef	_SYS_PSM_TYPES_H
@@ -38,6 +39,7 @@
 
 #include <sys/types.h>
 #include <sys/cpuvar.h>
+#include <sys/dditypes.h>
 #include <sys/time.h>
 
 #ifdef	__cplusplus

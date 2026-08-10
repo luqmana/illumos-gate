@@ -21,7 +21,7 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2019 Joyent, Inc.
- * Copyright 2024 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef	_SYS_PCIE_IMPL_H
@@ -411,7 +411,7 @@ typedef struct pice_fabric_data {
 
 /*
  * For hot plugged device, these data are init'ed during during probe
- * For non-hotplugged device, these data are init'ed in pci_autoconfig (on x86),
+ * For non-hotplugged device, these data are init'ed in pci_boot (on x86),
  * or in px_attach()(on sparc).
  *
  * For root complex the fields are initialized in pcie_rc_init_bus();
@@ -699,6 +699,7 @@ extern int pcie_dev(dev_info_t *dip);
 extern int pcie_root_port(dev_info_t *dip);
 extern void pcie_set_rber_fatal(dev_info_t *dip, boolean_t val);
 extern boolean_t pcie_get_rber_fatal(dev_info_t *dip);
+extern dev_info_t *pcie_get_rc_dip(dev_info_t *dip);
 
 extern uint32_t pcie_get_aer_uce_mask();
 extern uint32_t pcie_get_aer_ce_mask();

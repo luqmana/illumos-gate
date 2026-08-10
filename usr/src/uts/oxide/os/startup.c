@@ -25,7 +25,7 @@
  * Copyright 2017 Nexenta Systems, Inc.
  * Copyright (c) 2020 Joyent, Inc.
  * Copyright (c) 2015 by Delphix. All rights reserved.
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  * Copyright (c) 2020 Carlos Neira <cneirabustos@gmail.com>
  * Copyright 2025 Edgecast Cloud LLC.
  */
@@ -165,13 +165,6 @@ static void startup_tsc(void);
 static void startup_end(void);
 static void layout_kernel_va(void);
 static void setx86isalist(void);
-
-/*
- * XXX For the moment pci_boot.c expects this data to exist to create a list of
- * graphics devices for later use by things like the IOMMU. We should figure out
- * the right path forward here. But for now put it here to unblock things.
- */
-void *gfx_devinfo_list;
 
 /*
  * For now we can handle memory with physical addresses up to about

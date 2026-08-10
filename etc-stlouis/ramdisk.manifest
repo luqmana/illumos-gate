@@ -488,6 +488,7 @@ f kernel/misc/amd64/md5 0755 root sys
 f kernel/misc/amd64/mii 0755 root sys
 f kernel/misc/amd64/neti 0755 root sys
 f kernel/misc/amd64/pci_autoconfig 0755 root sys
+f kernel/misc/amd64/pci_boot 0755 root sys
 f kernel/misc/amd64/pcicfg 0755 root sys
 f kernel/misc/amd64/pcihp 0755 root sys
 f kernel/misc/amd64/sata 0755 root sys

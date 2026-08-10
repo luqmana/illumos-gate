@@ -23,6 +23,7 @@
 # Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 # Copyright 2015 Igor Kozhukhov <ikozhukhov@gmail.com>
+# Copyright 2026 Oxide Computer Company
 #
 
 #
@@ -43,11 +44,6 @@ UTSBASE	= ../..
 MODULE		= gfx_private
 OBJECTS		= $(GFX_PRIVATE_OBJS:%=$(OBJS_DIR)/%)
 ROOTMODULE	= $(ROOT_PSM_MISC_DIR)/$(MODULE)
-
-#
-#	dependency
-#
-LDFLAGS	+=      -Nmisc/pci_autoconfig
 
 #
 #	Include common rules.
