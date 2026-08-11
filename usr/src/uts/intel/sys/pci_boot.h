@@ -178,6 +178,13 @@ extern void pci_boot_fix_init(void);
 extern void pci_boot_register_fix(pci_prd_fix_f, pci_prd_unfix_f);
 
 /*
+ * Readies the state enumeration keeps about each bus, during module
+ * initialization and after the platform resource discovery module is up,
+ * since the highest bus number to expect is asked of it here.
+ */
+extern void pci_boot_enum_init(void);
+
+/*
  * The whole-system, two-pass enumeration flow used on i86pc.  The first pass
  * creates the device tree; the second reprograms devices the BIOS did not set
  * up.  Both passes must be bracketed by add_pci_fixes()/undo_pci_fixes(),
@@ -187,6 +194,30 @@ extern void pci_setup_tree(void);
 extern void pci_reprogram(void);
 extern void add_pci_fixes(void);
 extern void undo_pci_fixes(void);
+
+/*
+ * What a root bus node is called.
+ */
+#define	PCI_BOOT_RC_NODENAME	"pci"
+
+/*
+ * The per-root-complex flow, for a platform whose nexi know which root
+ * complexes exist and what each of them routes, and which therefore has no
+ * use for a search of the whole machine.  Enumerates and programs the one
+ * root bus given and the buses beneath it.
+ *
+ * The node is the caller's: it creates one beneath itself and addresses it
+ * however it addresses its children, then hands it over to be made the root
+ * of a PCI bus and populated.  It must be named "pci", since that is what
+ * binds a driver to a root bus with nothing PCIe on it, but how it is
+ * addressed is the caller's affair.  The caller must hold itself busy across
+ * this.  Being handed a node for a root bus already configured does nothing
+ * and succeeds, so an idempotent caller costs nothing.
+ *
+ * Returns an errno.  A failure leaves the node untouched, for the caller that
+ * created it to free.
+ */
+extern int pci_boot_rc_config(dev_info_t *, uint32_t);
 
 /*
  * Records a region of I/O port or memory space as consumed by an ISA device,

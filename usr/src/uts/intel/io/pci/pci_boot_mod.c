@@ -67,7 +67,7 @@ _init(void)
 		return (err);
 	}
 
-	pci_boot_maxbus = pci_prd_max_bus();
+	pci_boot_enum_init();
 
 	return (0);
 }

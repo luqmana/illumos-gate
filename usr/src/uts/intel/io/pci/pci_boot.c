@@ -166,10 +166,12 @@
  */
 
 #include <sys/types.h>
+#include <sys/errno.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/list.h>
 #include <sys/sunndi.h>
+#include <sys/ddi_impldefs.h>
 #include <sys/pci.h>
 #include <sys/pci_boot.h>
 #include <sys/pci_impl.h>
@@ -299,6 +301,15 @@ typedef struct pci_boot_undofix {
 
 static list_t pci_boot_fixes;
 static list_t pci_boot_undolist;
+
+/*
+ * Serializes enumeration, and with it everything we do to pci_bus_res.  The
+ * whole-system flow runs once from a bus probe and would need no lock, but the
+ * per-root-complex flow is driven by a nexus bus_config and so may be entered
+ * for two root complexes at once.  pci_prd.h promises the platform that it is
+ * called from a single thread at a time; this is what keeps that true.
+ */
+static kmutex_t pci_boot_lock;
 
 /*
  * Module prototypes
@@ -594,6 +605,33 @@ pci_unitaddr_cache_create(void)
 }
 
 
+void
+pci_boot_enum_init(void)
+{
+	mutex_init(&pci_boot_lock, NULL, MUTEX_DRIVER, NULL);
+
+	/*
+	 * Ask the platform how far the bus numbers go here rather than leaving
+	 * it to whoever enumerates: everything below is sized for the answer,
+	 * and there is nothing to be gained by letting the two disagree.
+	 */
+	pci_boot_maxbus = pci_prd_max_bus();
+
+	/*
+	 * Size the array that records what we learn about each bus for the bus
+	 * numbers we have been told to expect, and start every bus out
+	 * belonging to no parent, having no address of its own, and
+	 * subordinate to nothing but itself.  Enumeration fills the rest in as
+	 * it discovers it.
+	 */
+	alloc_res_array();
+	for (uint_t i = 0; i <= pci_boot_maxbus; i++) {
+		pci_bus_res[i].par_bus = (uchar_t)-1;
+		pci_bus_res[i].root_addr = (uchar_t)-1;
+		pci_bus_res[i].sub_bus = i;
+	}
+}
+
 /*
  * Enumerate all PCI devices
  */
@@ -601,13 +639,6 @@ void
 pci_setup_tree(void)
 {
 	uint_t i, root_bus_addr = 0;
-
-	alloc_res_array();
-	for (i = 0; i <= pci_boot_maxbus; i++) {
-		pci_bus_res[i].par_bus = (uchar_t)-1;
-		pci_bus_res[i].root_addr = (uchar_t)-1;
-		pci_bus_res[i].sub_bus = i;
-	}
 
 	pci_bus_res[0].root_addr = root_bus_addr++;
 	create_root_bus_dip(0);
@@ -653,17 +684,17 @@ pci_register_isa_resources(int type, uint32_t base, uint32_t size)
  * need a fully-capable global resource allocator).
  */
 static void
-remove_subtractive_res()
+remove_subtractive_res(uint_t lo, uint_t hi)
 {
-	int i, j;
+	uint_t i, j;
 	struct memlist *list;
 
-	for (i = 0; i <= pci_boot_maxbus; i++) {
+	for (i = lo; i <= hi; i++) {
 		if (pci_bus_res[i].subtractive) {
 			/* remove used io ports */
 			list = pci_bus_res[i].io_used;
 			while (list) {
-				for (j = 0; j <= pci_boot_maxbus; j++)
+				for (j = lo; j <= hi; j++)
 					(void) pci_memlist_remove(
 					    &pci_bus_res[j].io_avail,
 					    list->ml_address, list->ml_size);
@@ -672,7 +703,7 @@ remove_subtractive_res()
 			/* remove used mem resource */
 			list = pci_bus_res[i].mem_used;
 			while (list) {
-				for (j = 0; j <= pci_boot_maxbus; j++) {
+				for (j = lo; j <= hi; j++) {
 					(void) pci_memlist_remove(
 					    &pci_bus_res[j].mem_avail,
 					    list->ml_address, list->ml_size);
@@ -685,7 +716,7 @@ remove_subtractive_res()
 			/* remove used prefetchable mem resource */
 			list = pci_bus_res[i].pmem_used;
 			while (list) {
-				for (j = 0; j <= pci_boot_maxbus; j++) {
+				for (j = lo; j <= hi; j++) {
 					(void) pci_memlist_remove(
 					    &pci_bus_res[j].pmem_avail,
 					    list->ml_address, list->ml_size);
@@ -1607,6 +1638,68 @@ cmd_enable:
 	pci_putw(bus, dev, func, PCI_CONF_COMM, cmd_reg);
 }
 
+/*
+ * Reduce a root bus' available resources to what may actually be handed out,
+ * once its resources have been discovered and everything already present
+ * beneath it has been found.  Both are prerequisites: this must run after
+ * populate_bus_res() and after the CONFIG_INFO pass over the bus.
+ *
+ * First we work out how much 32-bit memory is spare, which is what is
+ * available beyond the sum of every BAR found below.  fix_ppb_res() later
+ * shares that out among the bus' bridges so each has room beyond what its
+ * children need now for something potentially hotplugged beneath it later.
+ * Then we take away everything already in use, which until now has only been
+ * recorded, not deducted.
+ *
+ * Resources in use by things that are not PCI devices at all are the caller's
+ * business: this knows only about what it enumerated.
+ */
+static void
+pci_boot_root_resource_trim(uchar_t bus)
+{
+	ASSERT3U(pci_bus_res[bus].par_bus, ==, (uchar_t)-1);
+
+	/*
+	 * The CONFIG_INFO pass populated `mem_size` with the sum of all of the
+	 * BAR sizes for all devices underneath, possibly adjusted up to allow
+	 * for alignment when it is later allocated, and recorded the number of
+	 * child bridges found under this bus in `num_bridge`.  The memory which
+	 * can be used for additional bridge allocations is the sum of the
+	 * `mem_avail` list less `mem_size`.
+	 */
+	if (pci_bus_res[bus].num_bridge > 0) {
+		uint64_t mem = 0;
+
+		for (struct memlist *ml = pci_bus_res[bus].mem_avail;
+		    ml != NULL; ml = ml->ml_next) {
+			if (ml->ml_address < UINT32_MAX)
+				mem += ml->ml_size;
+		}
+
+		if (mem > pci_bus_res[bus].mem_size)
+			mem -= pci_bus_res[bus].mem_size;
+		else
+			mem = 0;
+
+		pci_bus_res[bus].mem_buffer = mem;
+
+		dcmn_err(CE_NOTE, "Bus 0x%02x, bridges 0x%x, buffer mem 0x%lx",
+		    bus, pci_bus_res[bus].num_bridge, mem);
+	}
+
+	/* Remove used PCI resources from the bus resource map */
+	pci_memlist_remove_list(&pci_bus_res[bus].io_avail,
+	    pci_bus_res[bus].io_used);
+	pci_memlist_remove_list(&pci_bus_res[bus].mem_avail,
+	    pci_bus_res[bus].mem_used);
+	pci_memlist_remove_list(&pci_bus_res[bus].pmem_avail,
+	    pci_bus_res[bus].pmem_used);
+	pci_memlist_remove_list(&pci_bus_res[bus].mem_avail,
+	    pci_bus_res[bus].pmem_used);
+	pci_memlist_remove_list(&pci_bus_res[bus].pmem_avail,
+	    pci_bus_res[bus].mem_used);
+}
+
 void
 pci_reprogram(void)
 {
@@ -1686,61 +1779,15 @@ pci_reprogram(void)
 		    0, 0x100000);
 
 		/*
-		 * 3. Calculate the amount of "spare" 32-bit memory so that we
-		 * can use that later to determine how much additional memory
-		 * to allocate to bridges in order that they have a better
-		 * chance of supporting a device being hotplugged under them.
-		 *
-		 * This is a root bus and the previous CONFIG_INFO pass has
-		 * populated `mem_size` with the sum of all of the BAR sizes
-		 * for all devices underneath, possibly adjusted up to allow
-		 * for alignment when it is later allocated. This pass has also
-		 * recorded the number of child bridges found under this bus in
-		 * `num_bridge`. To calculate the memory which can be used for
-		 * additional bridge allocations we sum up the contents of the
-		 * `mem_avail` list and subtract `mem_size`.
-		 *
-		 * When programming child bridges later in fix_ppb_res(), the
-		 * bridge count and spare memory values cached against the
-		 * relevant root port are used to determine how much memory to
-		 * be allocated.
+		 * 3. Set aside memory for hotplug beneath this bus's bridges
+		 * and remove what the devices we found are already using.
 		 */
-		if (pci_bus_res[bus].num_bridge > 0) {
-			uint64_t mem = 0;
-
-			for (struct memlist *ml = pci_bus_res[bus].mem_avail;
-			    ml != NULL; ml = ml->ml_next) {
-				if (ml->ml_address < UINT32_MAX)
-					mem += ml->ml_size;
-			}
-
-			if (mem > pci_bus_res[bus].mem_size)
-				mem -= pci_bus_res[bus].mem_size;
-			else
-				mem = 0;
-
-			pci_bus_res[bus].mem_buffer = mem;
-
-			dcmn_err(CE_NOTE,
-			    "Bus 0x%02x, bridges 0x%x, buffer mem 0x%lx",
-			    bus, pci_bus_res[bus].num_bridge, mem);
-		}
+		pci_boot_root_resource_trim(bus);
 
 		/*
-		 * 4. Remove used PCI and ISA resources from bus resource map
+		 * 4. Remove the resources used by ISA devices, which the isa
+		 * nexus registered with us as it enumerated.
 		 */
-
-		pci_memlist_remove_list(&pci_bus_res[bus].io_avail,
-		    pci_bus_res[bus].io_used);
-		pci_memlist_remove_list(&pci_bus_res[bus].mem_avail,
-		    pci_bus_res[bus].mem_used);
-		pci_memlist_remove_list(&pci_bus_res[bus].pmem_avail,
-		    pci_bus_res[bus].pmem_used);
-		pci_memlist_remove_list(&pci_bus_res[bus].mem_avail,
-		    pci_bus_res[bus].pmem_used);
-		pci_memlist_remove_list(&pci_bus_res[bus].pmem_avail,
-		    pci_bus_res[bus].mem_used);
-
 		pci_memlist_remove_list(&pci_bus_res[bus].io_avail,
 		    isa_res.io_used);
 		pci_memlist_remove_list(&pci_bus_res[bus].mem_avail,
@@ -1769,7 +1816,7 @@ pci_reprogram(void)
 		ddi_prop_free(onoff);
 	}
 
-	remove_subtractive_res();
+	remove_subtractive_res(0, pci_boot_maxbus);
 
 	/* reprogram the non-subtractive PPB */
 	if (pci_reconfig)
@@ -1795,7 +1842,164 @@ pci_reprogram(void)
 }
 
 /*
- * populate bus resources
+ * Describe a node as the root of a PCI bus.
+ */
+static void
+pci_boot_root_bus_props(dev_info_t *dip, uchar_t bus)
+{
+	(void) ndi_prop_update_int(DDI_DEV_T_NONE, dip,
+	    "#address-cells", 3);
+	(void) ndi_prop_update_int(DDI_DEV_T_NONE, dip,
+	    "#size-cells", 2);
+
+	/*
+	 * If system has PCIe bus, then create different properties
+	 */
+	if (create_pcie_root_bus(bus, dip) == B_FALSE)
+		(void) ndi_prop_update_string(DDI_DEV_T_NONE, dip,
+		    "device_type", "pci");
+}
+
+/*
+ * Enumerate and program one root complex, on behalf of the nexus that routes
+ * to it.  This is the whole of what pci_setup_tree() and pci_reprogram() do
+ * between them, narrowed to a single root bus and the buses beneath it, and
+ * done in one visit rather than two passes over the machine.
+ *
+ * The node itself belongs to the caller: it created it beneath itself and
+ * named it.  What we do with it is make it the root of a PCI bus and fill in
+ * everything below.
+ *
+ * The two passes exist because a whole-system enumeration has to discover
+ * every root bus before it can know what any of them may be given: it learns
+ * the tree first and hands out resources second.  Here the caller has told us
+ * which root bus this is, and the platform can be asked what that bus routes
+ * before we look at it, so there is nothing to wait for.
+ *
+ * Repeated calls for the same root bus do nothing: the node persists whether
+ * or not anything below it is attached, so being handed the one we already
+ * have means this work is already done.
+ *
+ * Returns an errno.  Everything that can fail is checked before we touch the
+ * node, so a failure always leaves it exactly as the caller passed it in.
+ */
+int
+pci_boot_rc_config(dev_info_t *rcdip, uint32_t busno)
+{
+	uint_t bus, sub, i;
+
+	ASSERT(DEVI_BUSY_OWNED(ddi_get_parent(rcdip)));
+
+	if (busno > pci_boot_maxbus)
+		return (EINVAL);
+	bus = busno;
+
+	/*
+	 * The caller creates the node but we perform the bind below so let's
+	 * make sure it matches what we expect.
+	 */
+	if (strcmp(ddi_node_name(rcdip), PCI_BOOT_RC_NODENAME) != 0) {
+		cmn_err(CE_WARN, "!pci: refusing bus 0x%x: node is named "
+		    "\"%s\", not \"%s\"", bus, ddi_node_name(rcdip),
+		    PCI_BOOT_RC_NODENAME);
+		return (EINVAL);
+	}
+
+	mutex_enter(&pci_boot_lock);
+
+	if (pci_bus_res[bus].dip != NULL) {
+		int ret = (pci_bus_res[bus].dip == rcdip) ? 0 : EEXIST;
+
+		mutex_exit(&pci_boot_lock);
+		if (ret != 0) {
+			cmn_err(CE_WARN, "!pci: bus 0x%x already has a node",
+			    bus);
+		}
+		return (ret);
+	}
+
+	if (pci_bus_res[bus].par_bus != (uchar_t)-1) {
+		mutex_exit(&pci_boot_lock);
+		cmn_err(CE_WARN, "!pci: bus 0x%x is not a root bus", bus);
+		return (EINVAL);
+	}
+
+	/*
+	 * Make it a root bus and bind it before anything below it exists:
+	 * process_devfunc() asks pcie_get_rc_dip() about every child it
+	 * creates, and that looks upward for a node these properties have
+	 * already been set on.  The whole-system flow orders it the same way.
+	 */
+	num_root_bus++;
+	pci_bus_res[bus].dip = rcdip;
+	pci_boot_root_bus_props(rcdip, bus);
+	(void) ndi_devi_bind_driver(rcdip, 0);
+
+	populate_bus_res(bus);
+
+	ndi_devi_enter(rcdip);
+
+	/*
+	 * The bus range is re-read as we go: a bridge we find along the way may
+	 * report a subordinate bus beyond where the platform said this root
+	 * complex reaches, and those buses have to be walked too.  It only ever
+	 * grows, and only as far as a bridge claims, so this terminates.
+	 *
+	 * Only buses something decodes are worth walking, and by this point we
+	 * know which those are: this root bus, and the secondary bus of every
+	 * bridge we have already passed.  A bridge's secondary bus number is
+	 * always above its own, so walking in order means we meet a bridge
+	 * before the bus it leads to.  Anything else in the range is a bus
+	 * number the platform routes here but nothing answers on, so there is
+	 * nothing to find and no node to hang a find from.
+	 */
+	for (i = bus; i <= pci_bus_res[bus].sub_bus; i++) {
+		if (pci_bus_res[i].dip == NULL)
+			continue;
+		enumerate_bus_devs(i, CONFIG_INFO);
+	}
+	sub = pci_bus_res[bus].sub_bus;
+
+	pci_boot_root_resource_trim(bus);
+
+	add_bus_range_prop(bus);
+	for (i = bus; i <= sub; i++)
+		setup_bus_res(i);
+
+	remove_subtractive_res(bus, sub);
+
+	/*
+	 * Program the bridges, then the devices below them.  Unlike the
+	 * whole-system flow there is no "pci-reprog" escape hatch: a platform
+	 * that enumerates this way has firmware that leaves its devices
+	 * unprogrammed, so declining to program them would leave it with no
+	 * working PCI at all.
+	 */
+	for (i = bus; i <= sub; i++)
+		fix_ppb_res(i, B_FALSE);
+
+	for (i = bus; i <= sub; i++) {
+		/*
+		 * Reprogram the subtractive PPB. At this time, all its
+		 * siblings should have got their resources already.
+		 */
+		if (pci_bus_res[i].subtractive)
+			fix_ppb_res(i, B_TRUE);
+		enumerate_bus_devs(i, CONFIG_NEW);
+	}
+
+	for (i = bus; i <= sub; i++)
+		add_bus_available_prop(i);
+
+	ndi_devi_exit(rcdip);
+
+	mutex_exit(&pci_boot_lock);
+
+	return (0);
+}
+
+/*
+ * Populate a root bus's resources from what the platform tells us it routes.
  */
 static void
 populate_bus_res(uchar_t bus)
@@ -1834,6 +2038,12 @@ populate_bus_res(uchar_t bus)
 
 /*
  * Create top-level bus dips, i.e. /pci@0,0, /pci@1,0...
+ *
+ * A whole-system enumeration has no parent to speak for any of the root buses
+ * it finds, so it puts them all at the devinfo root and addresses each by
+ * `root_addr`, a counter assigned in the order they were encountered, carried
+ * in a legacy three-cell "reg".  That address is not the bus number and
+ * nothing about the hardware determines it.
  */
 static void
 create_root_bus_dip(uchar_t bus)
@@ -1844,22 +2054,13 @@ create_root_bus_dip(uchar_t bus)
 	ASSERT(pci_bus_res[bus].par_bus == (uchar_t)-1);
 
 	num_root_bus++;
-	ndi_devi_alloc_sleep(ddi_root_node(), "pci",
+	ndi_devi_alloc_sleep(ddi_root_node(), PCI_BOOT_RC_NODENAME,
 	    (pnode_t)DEVI_SID_NODEID, &dip);
-	(void) ndi_prop_update_int(DDI_DEV_T_NONE, dip,
-	    "#address-cells", 3);
-	(void) ndi_prop_update_int(DDI_DEV_T_NONE, dip,
-	    "#size-cells", 2);
 	pci_regs[0] = pci_bus_res[bus].root_addr;
 	(void) ndi_prop_update_int_array(DDI_DEV_T_NONE, dip,
 	    "reg", (int *)pci_regs, 3);
 
-	/*
-	 * If system has PCIe bus, then create different properties
-	 */
-	if (create_pcie_root_bus(bus, dip) == B_FALSE)
-		(void) ndi_prop_update_string(DDI_DEV_T_NONE, dip,
-		    "device_type", "pci");
+	pci_boot_root_bus_props(dip, bus);
 
 	(void) ndi_devi_bind_driver(dip, 0);
 	pci_bus_res[bus].dip = dip;
@@ -2138,7 +2339,14 @@ process_devfunc(uchar_t bus, uchar_t dev, uchar_t func, int config_op)
 		return;
 	}
 
-	/* make sure parent bus dip has been created */
+	/*
+	 * Make sure parent bus dip has been created.  Finding a device on a bus
+	 * with no node yet is how the whole-system flow discovers peer root
+	 * buses: it walks every bus number in turn, and a device answering on
+	 * one that no bridge claims means that bus is a root in its own right.
+	 * The per-root-complex flow never gets here, because it only walks
+	 * buses it already has a node for.
+	 */
 	if (pci_bus_res[bus].dip == NULL)
 		create_root_bus_dip(bus);
 
