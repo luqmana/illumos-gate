@@ -1824,7 +1824,7 @@ populate_bus_res(uchar_t bus)
 		/* Exclude 0x00 to 0xff of the I/O space, used by all PCs */
 		if (pci_bus_res[0].io_avail == NULL) {
 			pci_memlist_insert(&pci_bus_res[0].io_avail, 0x100,
-			    0xffff);
+			    0xff00);
 		}
 	}
 
