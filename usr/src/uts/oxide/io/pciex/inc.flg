@@ -55,7 +55,6 @@ find_files "s.*"	\
 # to compile the drivers/modules
 find_files "s.*"	\
 	usr/src/uts/oxide/npe			\
-	usr/src/uts/intel/pci_autoconfig	\
 	usr/src/uts/intel/pci_boot		\
 	usr/src/uts/intel/pcieb			\
 	usr/src/uts/intel/pcicfg

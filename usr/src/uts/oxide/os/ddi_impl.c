@@ -94,8 +94,6 @@ uint64_t ramdisk_start, ramdisk_end;
  */
 static int getlongprop_buf();
 static void get_boot_properties(void);
-static void impl_bus_initialprobe(void);
-static void impl_bus_reprobe(void);
 
 static int poke_mem(peekpoke_ctlops_t *in_args);
 static int peek_mem(peekpoke_ctlops_t *in_args);
@@ -197,12 +195,6 @@ configure(void)
 	 * Initialize root node.
 	 */
 	i_ddi_init_root();
-
-	/*
-	 * This is used only by pci_autoconfig and on this platform sets up all
-	 * the initial resource allocations for PCI devices.
-	 */
-	impl_bus_reprobe();
 
 	/*
 	 * Create and attach the fabric nexi: the df nodes (via rootnex's
@@ -2132,9 +2124,6 @@ impl_setup_ddi(void)
 	 * Check for administratively disabled drivers.
 	 */
 	check_driver_disable();
-
-	/* do bus dependent probes. */
-	impl_bus_initialprobe();
 }
 
 dev_t
@@ -2147,108 +2136,6 @@ getrootdev(void)
 	 */
 	return (ddi_pathname_to_dev_t(rootfs.bo_name));
 }
-
-static struct bus_probe {
-	struct bus_probe *next;
-	void (*probe)(int);
-} *bus_probes;
-
-void
-impl_bus_add_probe(void (*func)(int))
-{
-	struct bus_probe *probe;
-	struct bus_probe *lastprobe = NULL;
-
-	probe = kmem_alloc(sizeof (*probe), KM_SLEEP);
-	probe->probe = func;
-	probe->next = NULL;
-
-	if (!bus_probes) {
-		bus_probes = probe;
-		return;
-	}
-
-	lastprobe = bus_probes;
-	while (lastprobe->next)
-		lastprobe = lastprobe->next;
-	lastprobe->next = probe;
-}
-
-/*ARGSUSED*/
-void
-impl_bus_delete_probe(void (*func)(int))
-{
-	struct bus_probe *prev = NULL;
-	struct bus_probe *probe = bus_probes;
-
-	while (probe) {
-		if (probe->probe == func)
-			break;
-		prev = probe;
-		probe = probe->next;
-	}
-
-	if (probe == NULL)
-		return;
-
-	if (prev)
-		prev->next = probe->next;
-	else
-		bus_probes = probe->next;
-
-	kmem_free(probe, sizeof (struct bus_probe));
-}
-
-/*
- * impl_bus_initialprobe
- *	Modload the prom simulator, then let it probe to verify existence
- *	and type of PCI support.
- */
-static void
-impl_bus_initialprobe(void)
-{
-	struct bus_probe *probe;
-
-	/*
-	 * XXX What remains of this mechanism ought to go away as well.  The
-	 * df, ioms, and fch nexi are already created by their parents'
-	 * bus_config ops (rootnex's, df's, and ioms's, respectively, driven
-	 * from configure()), which is the model the one remaining probe
-	 * should follow: the PCI enumeration belongs in ioms's bus_config, at
-	 * which point this function, the probe list, and this modload can all
-	 * be deleted.  There is no chicken-and-egg reason for any of this to
-	 * happen before configure() -- nothing consumes the nodes this probe
-	 * creates until well after that -- the mechanism is simply inherited
-	 * from i86pc.
-	 */
-	if (modload("misc", "pci_autoconfig") < 0) {
-		panic("failed to load misc/pci_autoconfig");
-	}
-
-	probe = bus_probes;
-	while (probe) {
-		/* run the probe functions */
-		(*probe->probe)(0);
-		probe = probe->next;
-	}
-}
-
-/*
- * impl_bus_reprobe
- */
-static void
-impl_bus_reprobe(void)
-{
-	struct bus_probe *probe;
-
-	probe = bus_probes;
-	while (probe) {
-		/* run the probe function */
-		(*probe->probe)(1);
-		probe = probe->next;
-	}
-}
-
 
 /*
  * The following functions ready a cautious request to go up to the nexus

@@ -22,6 +22,8 @@ CONF_SRCDIR	= $(UTSBASE)/oxide/io
 
 include $(UTSBASE)/oxide/Makefile.oxide
 
+LDFLAGS		+= -Nmisc/pci_boot
+
 ALL_TARGET	= $(BINARY)
 INSTALL_TARGET	= $(BINARY) $(ROOTMODULE) $(ROOT_CONFFILE)
 

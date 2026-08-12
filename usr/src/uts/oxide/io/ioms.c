@@ -18,8 +18,8 @@
  * the system's PCIe root complexes and, on one instance per socket, the FCH.
  * Each instance identifies its unit in the I/O fabric, owns the generic
  * (non-PCI) address space the fabric routes to that unit, and enumerates the
- * children that decode it: today the fch(4D) nexus on the FCH-bearing
- * instance, with the PCIe root complexes to follow.
+ * children that decode it: its PCIe root complex, and the fch(4D) nexus on the
+ * FCH-bearing instance.
  *
  * --------------------------------------
  * Physical Organization and Nomenclature
@@ -103,11 +103,12 @@
  * "ranges" property on the child's node, and the child sub-allocates its
  * grant to its own children without ever reaching back into the fabric.
  *
- * Today the only such child is the FCH, present on the one IOMS per socket
- * whose IOHC it is attached to (ZEN_IOMS_F_HAS_FCH; IOMS 3 on Milan, 4 on
- * Turin -- always fabric-derived, never assumed).  What the FCH can decode
- * depends on its fabric role, which we communicate to fch(4D) via the
- * "fabric-role" property:
+ * Only the FCH is granted such a window, our other child, the root complex,
+ * draws on the fabric's PCI pool by an entirely different route (see below).
+ * The FCH is present on the one IOMS per socket whose IOHC it is attached to
+ * (ZEN_IOMS_F_HAS_FCH; IOMS 3 on Milan, 4 on Turin -- always fabric-derived,
+ * never assumed).  What the FCH can decode depends on its fabric role, which
+ * we communicate to fch(4D) via the "fabric-role" property:
  *
  *  - The primary FCH (on the primary I/O die) subtractively decodes the whole
  *    legacy/compatibility space; it is granted everything in the generic
@@ -141,11 +142,23 @@
  * generic space on such an IOMS, and it remains accounted as used in the
  * fabric should that ever change.
  *
- * The FCH is a singleton with no address on any bus -- unlike its future
- * sibling, the PCIe root complex, which PCI addresses by root bus number --
- * so its node has an explicitly empty "unit-address", the property from
- * which our INITCHILD names every child: the node is just e.g. "huashan",
- * identified positionally by its df@/ioms@ ancestry.
+ * The FCH is a singleton with no address on any bus so its node has an
+ * explicitly empty "unit-address", the property from which our INITCHILD names
+ * every child: the node is just e.g. "huashan", identified positionally by its
+ * df@/ioms@ ancestry.
+ *
+ * ---------------------
+ * The PCIe Root Complex
+ * ---------------------
+ *
+ * Our other child is the root bus of the root complex the IOHC implements,
+ * created for every instance since every IOMS has one.  We create and name the
+ * node ("pci"), addressed by the fabric's bus number for this unit, and
+ * misc/pci_boot does everything else: the properties that make it a PCI root
+ * bus, the walk of the buses beneath it, and the assignment and programming of
+ * the resources it finds, which come from the fabric's PCI pool via
+ * pci_prd_find_resource() rather than from the generic pool we hold.  See
+ * pci_boot_rc_config() in <sys/pci_boot.h>.
  */
 
 #include <sys/cmn_err.h>
@@ -160,6 +173,7 @@
 #include <sys/kmem.h>
 #include <sys/memlist.h>
 #include <sys/modctl.h>
+#include <sys/pci_boot.h>
 #include <sys/stdbool.h>
 #include <sys/sunddi.h>
 #include <sys/sunndi.h>
@@ -600,33 +614,109 @@ fail:
 	return (NDI_FAILURE);
 }
 
+/*
+ * Idempotently create the node for this IOMS's PCIe root complex and have the
+ * boot enumeration library fill in everything below it.  Every IOMS hosts an
+ * IOHC that acts as a root complex with a root bus of its own, so unlike the
+ * FCH there is one of these under each of us.
+ *
+ * The node is addressed by that root bus number which the library will also
+ * record as the first half of the node's "bus-range".
+ */
+static int
+ioms_config_rc(ioms_t *iop)
+{
+	dev_info_t *pdip = iop->io_dip;
+	dev_info_t *cdip;
+	uint32_t busno;
+	char ua[5];
+	int ret;
+
+	ASSERT(DEVI_BUSY_OWNED(pdip));
+
+	for (cdip = ddi_get_child(pdip); cdip != NULL;
+	    cdip = ddi_get_next_sibling(cdip)) {
+		/*
+		 * The node already exists -- nothing more to do.
+		 */
+		if (strcmp(ddi_node_name(cdip), PCI_BOOT_RC_NODENAME) == 0)
+			return (NDI_SUCCESS);
+	}
+
+	busno = zen_ioms_pci_busno(iop->io_ioms);
+	(void) snprintf(ua, sizeof (ua), "%x", busno);
+
+	ndi_devi_alloc_sleep(pdip, PCI_BOOT_RC_NODENAME,
+	    (pnode_t)DEVI_SID_NODEID, &cdip);
+
+	if (ndi_prop_update_string(DDI_DEV_T_NONE, cdip, "unit-address", ua) !=
+	    NDI_SUCCESS) {
+		dev_err(pdip, CE_WARN, "failed to create root complex "
+		    "'unit-address' property");
+		goto fail;
+	}
+
+	/*
+	 * Configure the RC and any buses/devices under it.  This will also
+	 * bind the correct driver.
+	 */
+	if ((ret = pci_boot_rc_config(cdip, busno)) != 0) {
+		dev_err(pdip, CE_WARN, "failed to enumerate the root complex "
+		    "on bus 0x%x: %d", busno, ret);
+		goto fail;
+	}
+
+	return (NDI_SUCCESS);
+
+fail:
+	(void) ndi_devi_free(cdip);
+	return (NDI_FAILURE);
+}
+
 static int
 ioms_config_one(ioms_t *iop, const char *devname)
 {
+	const uint16_t busno = zen_ioms_pci_busno(iop->io_ioms);
 	char *devname_dup, *cname, *caddr;
+	unsigned long cua;
 	size_t devname_sz;
-	const char *nodename;
-	bool match;
+	const char *fchname;
+	bool rc, fch;
 
-	nodename = fch_kind_name(chiprev_fch_kind(cpuid_getchiprev(CPU)));
+	fchname = fch_kind_name(chiprev_fch_kind(cpuid_getchiprev(CPU)));
 
 	devname_dup = i_ddi_strdup(devname, KM_SLEEP);
 	devname_sz = strlen(devname_dup) + 1;
 	i_ddi_parse_name(devname_dup, &cname, &caddr, NULL);
 
 	/*
-	 * Our only child is the address-less FCH node.
+	 * We have at most two children, and which one is being asked for is
+	 * decided by the name.
 	 */
-	match = iop->io_fch_nranges != 0 && nodename != NULL &&
-	    cname != NULL && strcmp(cname, nodename) == 0 &&
+	rc = cname != NULL && strcmp(cname, PCI_BOOT_RC_NODENAME) == 0;
+	fch = iop->io_fch_nranges != 0 && fchname != NULL &&
+	    cname != NULL && strcmp(cname, fchname) == 0 &&
 	    (caddr == NULL || *caddr == '\0');
+
+	/*
+	 * The FCH is an address-less singleton, and only the one IOMS that has
+	 * one offers it.  But the root complex is addressed by its bus number,
+	 * so we validate that.
+	 */
+	if (rc && (ddi_strtoul(caddr, NULL, 16, &cua) != 0 || cua != busno)) {
+		kmem_free(devname_dup, devname_sz);
+		return (NDI_EINVAL);
+	}
 
 	kmem_free(devname_dup, devname_sz);
 
-	if (!match)
-		return (NDI_EINVAL);
+	if (fch)
+		return (ioms_config_fch(iop));
+	if (rc)
 
-	return (ioms_config_fch(iop));
+		return (ioms_config_rc(iop));
+
+	return (NDI_EINVAL);
 }
 
 static int
@@ -654,6 +744,8 @@ ioms_bus_config(dev_info_t *pdip, uint_t flags, ddi_bus_config_op_t op,
 		ret = ioms_config_one(iop, (const char *)arg);
 	} else {
 		ret = ioms_config_fch(iop);
+		if (ret == NDI_SUCCESS)
+			ret = ioms_config_rc(iop);
 	}
 	ndi_devi_exit(pdip);
 
