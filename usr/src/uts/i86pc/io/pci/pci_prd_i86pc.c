@@ -44,6 +44,7 @@
 #include <sys/types.h>
 #include <sys/errno.h>
 #include <sys/memlist.h>
+#include <sys/memlist_impl.h>
 #include <sys/pci.h>
 #include <sys/pci_impl.h>
 #include <sys/pci_cfgspace_impl.h>
@@ -221,7 +222,7 @@ acpi_trim_bus_ranges(void)
 		 * create copy of existing range and overload
 		 * 'prev' pointer to link existing to new copy
 		 */
-		new = pci_memlist_alloc();
+		new = xmemlist_get_one(&memlist_kmem_pool);
 		new->ml_address = orig->ml_address;
 		new->ml_size = orig->ml_size;
 		new->ml_prev = orig;
@@ -264,7 +265,7 @@ acpi_trim_bus_ranges(void)
 	}
 
 	/* discard the list */
-	pci_memlist_free_all(&ranges);	/* OK if ranges == NULL */
+	memlist_rsrc_free(&ranges);	/* OK if ranges == NULL */
 }
 
 static size_t
@@ -375,8 +376,8 @@ acpi_wr_cb(ACPI_RESOURCE *rp, void *context)
 		if (rp->Data.Io.AddressLength == 0)
 			break;
 		acpi_cb_cnt++;
-		pci_memlist_insert(&acpi_io_res[bus], rp->Data.Io.Minimum,
-		    rp->Data.Io.AddressLength);
+		(void) memlist_rsrc_add(rp->Data.Io.Minimum,
+		    rp->Data.Io.AddressLength, &acpi_io_res[bus]);
 		if (pci_prd_debug != 0) {
 			acpi_dbg(bus, rp->Data.Io.Minimum,
 			    rp->Data.Io.AddressLength, 0, ACPI_IO_RANGE, "IO");
@@ -415,10 +416,10 @@ acpi_wr_cb(ACPI_RESOURCE *rp, void *context)
 		if (rp->Data.Address16.Address.AddressLength == 0)
 			break;
 		acpi_cb_cnt++;
-		pci_memlist_insert(rlistpp(rp->Data.Address16.ResourceType,
-		    rp->Data.Address.Info.Mem.Caching, bus),
-		    rp->Data.Address16.Address.Minimum,
-		    rp->Data.Address16.Address.AddressLength);
+		(void) memlist_rsrc_add(rp->Data.Address16.Address.Minimum,
+		    rp->Data.Address16.Address.AddressLength,
+		    rlistpp(rp->Data.Address16.ResourceType,
+		    rp->Data.Address.Info.Mem.Caching, bus));
 		if (pci_prd_debug != 0) {
 			acpi_dbg(bus,
 			    rp->Data.Address16.Address.Minimum,
@@ -432,10 +433,10 @@ acpi_wr_cb(ACPI_RESOURCE *rp, void *context)
 		if (rp->Data.Address32.Address.AddressLength == 0)
 			break;
 		acpi_cb_cnt++;
-		pci_memlist_insert(rlistpp(rp->Data.Address32.ResourceType,
-		    rp->Data.Address.Info.Mem.Caching, bus),
-		    rp->Data.Address32.Address.Minimum,
-		    rp->Data.Address32.Address.AddressLength);
+		(void) memlist_rsrc_add(rp->Data.Address32.Address.Minimum,
+		    rp->Data.Address32.Address.AddressLength,
+		    rlistpp(rp->Data.Address32.ResourceType,
+		    rp->Data.Address.Info.Mem.Caching, bus));
 		if (pci_prd_debug != 0) {
 			acpi_dbg(bus,
 			    rp->Data.Address32.Address.Minimum,
@@ -450,10 +451,10 @@ acpi_wr_cb(ACPI_RESOURCE *rp, void *context)
 			break;
 
 		acpi_cb_cnt++;
-		pci_memlist_insert(rlistpp(rp->Data.Address64.ResourceType,
-		    rp->Data.Address.Info.Mem.Caching, bus),
-		    rp->Data.Address64.Address.Minimum,
-		    rp->Data.Address64.Address.AddressLength);
+		(void) memlist_rsrc_add(rp->Data.Address64.Address.Minimum,
+		    rp->Data.Address64.Address.AddressLength,
+		    rlistpp(rp->Data.Address64.ResourceType,
+		    rp->Data.Address.Info.Mem.Caching, bus));
 		if (pci_prd_debug != 0) {
 			acpi_dbg(bus,
 			    rp->Data.Address64.Address.Minimum,
@@ -467,10 +468,10 @@ acpi_wr_cb(ACPI_RESOURCE *rp, void *context)
 		if (rp->Data.ExtAddress64.Address.AddressLength == 0)
 			break;
 		acpi_cb_cnt++;
-		pci_memlist_insert(rlistpp(rp->Data.ExtAddress64.ResourceType,
-		    rp->Data.Address.Info.Mem.Caching, bus),
-		    rp->Data.ExtAddress64.Address.Minimum,
-		    rp->Data.ExtAddress64.Address.AddressLength);
+		(void) memlist_rsrc_add(rp->Data.ExtAddress64.Address.Minimum,
+		    rp->Data.ExtAddress64.Address.AddressLength,
+		    rlistpp(rp->Data.ExtAddress64.ResourceType,
+		    rp->Data.Address.Info.Mem.Caching, bus));
 		if (pci_prd_debug != 0) {
 			acpi_dbg(bus,
 			    rp->Data.ExtAddress64.Address.Minimum,
@@ -609,7 +610,7 @@ mps_find_bus_res(uint32_t bus, pci_prd_rsrc_t rsrc, struct memlist **res)
 				    (uint64_t)sasmp->sasm_as_base_hi << 32;
 				len = (uint64_t)sasmp->sasm_as_len |
 				    (uint64_t)sasmp->sasm_as_len_hi << 32;
-				pci_memlist_insert(res, base, len);
+				(void) memlist_rsrc_add(base, len, res);
 				res_cnt++;
 			}
 			extp += SYS_AS_MAPPING_SIZE;
@@ -624,7 +625,7 @@ mps_find_bus_res(uint32_t bus, pci_prd_rsrc_t rsrc, struct memlist **res)
 			cmn_err(CE_WARN, "Unknown descriptor type %d"
 			    " in BIOS Multiprocessor Spec table.",
 			    *extp);
-			pci_memlist_free_all(res);
+			memlist_rsrc_free(res);
 			return (0);
 		}
 	}
@@ -670,23 +671,23 @@ hrt_find_bus_res(uint32_t bus, pci_prd_rsrc_t type, struct memlist **res)
 		if (type == PCI_PRD_R_IO) {
 			if (hpep->php_io_start == 0 || hpep->php_io_size == 0)
 				continue;
-			pci_memlist_insert(res, (uint64_t)hpep->php_io_start,
-			    (uint64_t)hpep->php_io_size);
+			(void) memlist_rsrc_add((uint64_t)hpep->php_io_start,
+			    (uint64_t)hpep->php_io_size, res);
 			res_cnt++;
 		} else if (type == PCI_PRD_R_MMIO) {
 			if (hpep->php_mem_start == 0 || hpep->php_mem_size == 0)
 				continue;
-			pci_memlist_insert(res,
+			(void) memlist_rsrc_add(
 			    ((uint64_t)hpep->php_mem_start) << 16,
-			    ((uint64_t)hpep->php_mem_size) << 16);
+			    ((uint64_t)hpep->php_mem_size) << 16, res);
 			res_cnt++;
 		} else if (type == PCI_PRD_R_PREFETCH) {
 			if (hpep->php_pfmem_start == 0 ||
 			    hpep->php_pfmem_size == 0)
 				continue;
-			pci_memlist_insert(res,
+			(void) memlist_rsrc_add(
 			    ((uint64_t)hpep->php_pfmem_start) << 16,
-			    ((uint64_t)hpep->php_pfmem_size) << 16);
+			    ((uint64_t)hpep->php_pfmem_size) << 16, res);
 			res_cnt++;
 		}
 	}
@@ -744,14 +745,14 @@ legacy_find_bus0_res(pci_prd_rsrc_t rsrc, struct memlist **res)
 		 * Whatever the boot loader noted as possibly available for
 		 * PCI MMIO.
 		 */
-		*res = pci_memlist_dup(bootops->boot_mem->pcimem);
+		*res = memlist_rsrc_dup(bootops->boot_mem->pcimem);
 		break;
 	case PCI_PRD_R_IO:
 		/*
 		 * For I/O space [0x0,0xFFFF], the assumption is that the
 		 * first 256 bytes [0x00,0xFF] are reserved for the system.
 		 */
-		pci_memlist_insert(res, 0x100, 0xff00);
+		(void) memlist_rsrc_add(0x100, 0xff00, res);
 		break;
 	default:
 		return (0);
@@ -1009,10 +1010,10 @@ pci_prd_fini(void)
 	int bus;
 
 	for (bus = 0; bus <= pci_bios_maxbus; bus++) {
-		pci_memlist_free_all(&acpi_io_res[bus]);
-		pci_memlist_free_all(&acpi_mem_res[bus]);
-		pci_memlist_free_all(&acpi_pmem_res[bus]);
-		pci_memlist_free_all(&acpi_bus_res[bus]);
+		memlist_rsrc_free(&acpi_io_res[bus]);
+		memlist_rsrc_free(&acpi_mem_res[bus]);
+		memlist_rsrc_free(&acpi_pmem_res[bus]);
+		memlist_rsrc_free(&acpi_bus_res[bus]);
 	}
 }
 

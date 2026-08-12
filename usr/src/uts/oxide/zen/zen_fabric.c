@@ -4217,13 +4217,12 @@ zen_fabric_rsrc_subsume_locked(zen_ioms_memlists_t *imp, zen_ioms_rsrc_t rsrc)
 	}
 
 	/*
-	 * We have some resources available for this NB instance. In this
-	 * particular case, we need to first duplicate these using kmem and then
-	 * we can go ahead and move all of these to the used list.  This is done
-	 * for the benefit of PCI code which expects it, but we do it
-	 * universally for consistency.
+	 * We have some resources available for this NB instance.  Copy them
+	 * into the kmem-backed pool before moving ours to the used list: what
+	 * we hand out stops being ours, and an entry can only be freed to the
+	 * pool it came from, so the consumer needs entries of its own.
 	 */
-	ret = memlist_kmem_dup(*avail, KM_SLEEP);
+	ret = xmemlist_dup(&memlist_kmem_pool, *avail);
 
 	/*
 	 * XXX This ends up not really coalescing ranges, but maybe that's fine.

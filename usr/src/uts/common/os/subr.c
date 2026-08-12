@@ -51,7 +51,6 @@
 #include <sys/atomic.h>
 #include <sys/model.h>
 #include <sys/kmem.h>
-#include <sys/memlist.h>
 #include <sys/autoconf.h>
 #include <sys/ontrap.h>
 #include <sys/utsname.h>
@@ -390,37 +389,6 @@ report_stack_exec(proc_t *p, caddr_t addr)
 	}
 
 	delay(hz / 50);
-}
-
-/*
- * Determine whether the address range [addr, addr + len) is in memlist mp.
- */
-int
-address_in_memlist(struct memlist *mp, uint64_t addr, size_t len)
-{
-	while (mp != 0)	 {
-		if ((addr >= mp->ml_address) &&
-		    (addr + len <= mp->ml_address + mp->ml_size))
-			return (1);	 /* TRUE */
-		mp = mp->ml_next;
-	}
-	return (0);	/* FALSE */
-}
-
-/*
- * Returns the count of items in memlist mp.
- */
-size_t
-memlist_count(const struct memlist *mp)
-{
-	size_t count = 0;
-
-	while (mp != NULL) {
-		count++;
-		mp = mp->ml_next;
-	}
-
-	return (count);
 }
 
 /*

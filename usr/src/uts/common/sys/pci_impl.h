@@ -119,19 +119,6 @@ struct pci_bus_resource {
 
 extern struct pci_bus_resource *pci_bus_res;
 
-extern struct memlist *pci_memlist_alloc(void);
-extern void pci_memlist_free(struct memlist *);
-extern void pci_memlist_free_all(struct memlist **);
-extern void pci_memlist_insert(struct memlist **, uint64_t, uint64_t);
-extern int pci_memlist_remove(struct memlist **, uint64_t, uint64_t);
-extern uint64_t pci_memlist_find(struct memlist **, uint64_t, int);
-extern uint64_t pci_memlist_find_with_startaddr(struct memlist **, uint64_t,
-    uint64_t, int);
-extern void pci_memlist_dump(struct memlist *);
-extern void pci_memlist_subsume(struct memlist **, struct memlist **);
-extern void pci_memlist_merge(struct memlist **, struct memlist **);
-extern struct memlist *pci_memlist_dup(struct memlist *);
-
 #endif /* __i386 || __amd64 */
 
 /* Definitions for minor numbers */
