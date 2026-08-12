@@ -119,9 +119,9 @@ fch_rangespec_size(const fch_rangespec_t *const frp)
 }
 
 static inline char *
-fch_rangespec_to_ndi_ra_type(const fch_rangespec_t *const frp)
+fch_addrsp_to_ndi_ra_type(const fch_addrsp_t as)
 {
-	switch (frp->fr_addrsp) {
+	switch (as) {
 	case FA_LEGACY:
 		return (NDI_RA_TYPE_IO);
 	case FA_MMIO:
@@ -129,6 +129,12 @@ fch_rangespec_to_ndi_ra_type(const fch_rangespec_t *const frp)
 	default:
 		return (NULL);
 	}
+}
+
+static inline char *
+fch_rangespec_to_ndi_ra_type(const fch_rangespec_t *const frp)
+{
+	return (fch_addrsp_to_ndi_ra_type(frp->fr_addrsp));
 }
 
 /*

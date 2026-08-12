@@ -78,16 +78,19 @@ typedef struct zen_ioms_memlists {
 	struct memlist		*zim_bus_used;
 
 	/*
-	 * The generic (non-PCI) resources that have been permanently granted
-	 * to the device tree via zen_fabric_gen_grant().  The transfer out of
-	 * the available pools above is destructive and happens only once, so
-	 * the grant is recorded here -- in fabric-owned storage that outlives
-	 * any driver soft state -- allowing the granting nexus to recover it
-	 * on a subsequent attach.
+	 * Everything this IOMS routes, permanently granted to the device tree
+	 * via zen_fabric_ioms_grant(): the union of the PCI and generic pools
+	 * above for each type, since which consumer gets what is decided by
+	 * the nexus rather than here.  The transfer out of the available pools
+	 * is destructive and happens only once, so the grant is recorded here,
+	 * in fabric-owned storage that outlives any driver soft state,
+	 * allowing the granting nexus to recover it on a subsequent attach.
 	 */
-	bool			zim_gen_granted;
-	struct memlist		*zim_io_gen_grant;
-	struct memlist		*zim_mmio_gen_grant;
+	bool			zim_granted;
+	struct memlist		*zim_io_grant;
+	struct memlist		*zim_mmio_grant;
+	struct memlist		*zim_pmem_grant;
+	struct memlist		*zim_bus_grant;
 } zen_ioms_memlists_t;
 
 /*
@@ -424,7 +427,6 @@ extern int zen_fabric_walk_pcie_port(zen_fabric_t *, zen_pcie_port_cb_f,
 extern int zen_fabric_walk_nbif(zen_fabric_t *, zen_nbif_cb_f, void *);
 
 extern zen_ioms_t *zen_fabric_find_ioms(zen_fabric_t *, uint32_t);
-extern zen_ioms_t *zen_fabric_find_ioms_by_bus(zen_fabric_t *, uint32_t);
 extern zen_pcie_port_t *zen_fabric_find_pcie_port_by_bdf(uint8_t, uint8_t,
     uint8_t);
 

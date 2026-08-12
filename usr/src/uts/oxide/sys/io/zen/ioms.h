@@ -36,6 +36,18 @@ extern "C" {
 #define	IOMS_PROP_PCI_BUS	"pci-bus"
 #define	IOMS_PROP_FABRIC_ID	"fabric-id"
 
+/*
+ * The properties by which an ioms(4D) instance grants its PCIe root complex
+ * child the address space that child may hand out.  IOMS_PROP_PCI_GRANT is an
+ * array of pci_regspec_t, the same 1275 form a PCI nexus already uses for its
+ * "ranges" and "available".  IOMS_PROP_BUS_GRANT is a pair of bus numbers, as
+ * "bus-range" is.  Both describe what the root bus was given, before
+ * enumeration has assigned any of it which is why neither reuses the name of
+ * the property enumeration itself writes when it is done.
+ */
+#define	IOMS_PROP_PCI_GRANT	"pci-grant"
+#define	IOMS_PROP_BUS_GRANT	"bus-grant"
+
 #ifdef	__cplusplus
 }
 #endif

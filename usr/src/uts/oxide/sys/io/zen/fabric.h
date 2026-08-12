@@ -24,7 +24,6 @@
 #include <sys/types.h>
 #include <sys/stdbool.h>
 #include <sys/bitext.h>
-#include <sys/plat/pci_prd.h>
 #include <sys/io/zen/smn.h>
 
 #ifdef	__cplusplus
@@ -50,19 +49,6 @@ typedef struct zen_pcie_port zen_pcie_port_t;
 typedef struct zen_pcie_dbg zen_pcie_dbg_t;
 typedef struct zen_pcie_reg_dbg zen_pcie_reg_dbg_t;
 typedef struct zen_pcie_strap_setting zen_pcie_strap_setting_t;
-
-/*
- * Generic resource types that can be routed via an IOMS.
- */
-typedef enum zen_ioms_rsrc {
-	ZIR_NONE,
-	ZIR_PCI_LEGACY,
-	ZIR_PCI_MMIO,
-	ZIR_PCI_PREFETCH,
-	ZIR_PCI_BUS,
-	ZIR_GEN_LEGACY,
-	ZIR_GEN_MMIO
-} zen_ioms_rsrc_t;
 
 /*
  * Walks IOMSes and applies a callback.  While most walkers are hidden as part
@@ -195,23 +181,19 @@ extern void zen_fabric_init_post_mpstartup(void);
 extern uint64_t zen_fabric_ecam_base(void);
 
 /*
- * Given a PCI resource type and a PCI bus number, transfers unallocated
- * resources of that type from an IOMS root port to PCI, returning a memlist
- * with the transferred resources.  Returns NULL if no resources are available.
- * For things that are not PCI, use zen_fabric_gen_grant, instead.
+ * Returns everything the given IOMS routes (legacy I/O, MMIO, prefetchable
+ * MMIO, and PCI bus numbers) transferring it out of the fabric's available
+ * pools on the first call and returning the same recorded grant on any
+ * subsequent one.  How much of it goes to PCI and how much to anything else is
+ * for the nexus that receives it to decide; the split the allocators make
+ * internally is not reflected here.
+ *
+ * The returned memlists are owned by the fabric and stable for the lifetime of
+ * the system; callers must not modify or free them.  Any of them may be NULL
+ * if no resources of that type are available.
  */
-extern struct memlist *zen_fabric_pci_subsume(uint32_t, pci_prd_rsrc_t);
-
-/*
- * Returns the generic (non-PCI) legacy I/O and MMIO resources routed by the
- * given IOMS, transferring them out of the fabric's available pools on the
- * first call and returning the same recorded grant on any subsequent one.
- * The returned memlists are owned by the fabric and stable for the lifetime
- * of the system; callers must not modify or free them.  Either may be NULL if
- * no resources of that type are available.
- */
-extern void zen_fabric_gen_grant(zen_ioms_t *, const struct memlist **,
-    const struct memlist **);
+extern void zen_fabric_ioms_grant(zen_ioms_t *, const struct memlist **,
+    const struct memlist **, const struct memlist **, const struct memlist **);
 
 /*
  * Enable the NMI functionality in the IOHC to allow external devices (i.e., the

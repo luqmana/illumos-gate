@@ -24,13 +24,16 @@
 #include <sys/errno.h>
 #include <sys/pci.h>
 #include <sys/sunndi.h>
+#include <sys/memlist_impl.h>
 #include <sys/pcie_impl.h>
-#include <sys/io/zen/fabric.h>
+#include <sys/io/zen/ioms.h>
 #include <sys/io/zen/pcie_impl.h>
 
 #define	BUS(bdf) (((bdf) & PCIE_REQ_ID_BUS_MASK) >> PCIE_REQ_ID_BUS_SHIFT)
 #define	DEV(bdf) (((bdf) & PCIE_REQ_ID_DEV_MASK) >> PCIE_REQ_ID_DEV_SHIFT)
 #define	FUNC(bdf) (((bdf) & PCIE_REQ_ID_FUNC_MASK) >> PCIE_REQ_ID_FUNC_SHIFT)
+
+static pci_prd_upcalls_t *prd_upcalls;
 
 /*
  * We always just tell the system to scan all PCI buses.
@@ -41,15 +44,113 @@ pci_prd_max_bus(void)
 	return (PCI_MAX_BUS_NUM - 1);
 }
 
+static struct memlist *
+pci_prd_grant(dev_info_t *dip, pci_prd_rsrc_t rsrc)
+{
+	pci_regspec_t *ps = NULL;
+	struct memlist *ml = NULL;
+	uint_t nint, nspec;
+	uint32_t want;
+
+	switch (rsrc) {
+	case PCI_PRD_R_IO:
+		want = PCI_ADDR_IO;
+		break;
+	case PCI_PRD_R_MMIO:
+		want = PCI_ADDR_MEM32;
+		break;
+	case PCI_PRD_R_PREFETCH:
+		want = PCI_ADDR_MEM32 | PCI_PREFETCH_B;
+		break;
+	default:
+		return (NULL);
+	}
+
+	if (ddi_prop_lookup_int_array(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
+	    IOMS_PROP_PCI_GRANT, (int **)&ps, &nint) != DDI_SUCCESS) {
+		return (NULL);
+	}
+
+	nspec = nint / (sizeof (pci_regspec_t) / sizeof (int));
+
+	for (uint_t i = 0; i < nspec; i++) {
+		uint64_t base, len;
+
+		if ((ps[i].pci_phys_hi & PCI_PREFETCH_B) !=
+		    (want & PCI_PREFETCH_B)) {
+			continue;
+		}
+
+		switch (ps[i].pci_phys_hi & PCI_ADDR_MASK) {
+		case PCI_ADDR_IO:
+			if ((want & PCI_ADDR_MASK) != PCI_ADDR_IO)
+				continue;
+			break;
+		case PCI_ADDR_MEM32:
+		case PCI_ADDR_MEM64:
+			if ((want & PCI_ADDR_MASK) == PCI_ADDR_IO)
+				continue;
+			break;
+		default:
+			continue;
+		}
+
+		base = (uint64_t)ps[i].pci_phys_mid << 32 |
+		    (uint64_t)ps[i].pci_phys_low;
+		len = (uint64_t)ps[i].pci_size_hi << 32 |
+		    (uint64_t)ps[i].pci_size_low;
+
+		if (len != 0)
+			(void) memlist_rsrc_add(base, len, &ml);
+	}
+
+	ddi_prop_free(ps);
+
+	return (ml);
+}
+
+static struct memlist *
+pci_prd_bus_grant(dev_info_t *dip)
+{
+	struct memlist *ml = NULL;
+	int *range = NULL;
+	uint_t nint;
+
+	if (ddi_prop_lookup_int_array(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
+	    IOMS_PROP_BUS_GRANT, &range, &nint) != DDI_SUCCESS) {
+		return (NULL);
+	}
+
+	if (nint == 2 && range[1] >= range[0])
+		(void) memlist_rsrc_add(range[0], range[1] - range[0] + 1, &ml);
+
+	ddi_prop_free(range);
+
+	return (ml);
+}
+
+/*
+ * The ioms(4D) nexus which creates the root complex nodes publishes the
+ * address space routed to each as properties we can retrieve.
+ * See IOMS_PROP_PCI_GRANT / IOMS_PROP_BUS_GRANT in <sys/io/zen/ioms.h>.
+ */
 struct memlist *
 pci_prd_find_resource(uint32_t bus, pci_prd_rsrc_t rsrc)
 {
+	dev_info_t *dip;
+
+	if (prd_upcalls == NULL ||
+	    (dip = prd_upcalls->pru_bus2dip_f(bus)) == NULL) {
+		return (NULL);
+	}
+
 	switch (rsrc) {
+	case PCI_PRD_R_BUS:
+		return (pci_prd_bus_grant(dip));
 	case PCI_PRD_R_IO:
 	case PCI_PRD_R_MMIO:
-	case PCI_PRD_R_BUS:
 	case PCI_PRD_R_PREFETCH:
-		return (zen_fabric_pci_subsume(bus, rsrc));
+		return (pci_prd_grant(dip, rsrc));
 	default:
 		return (NULL);
 	}
@@ -151,6 +252,8 @@ pci_prd_pcie_set_preset_mask(dev_info_t *bridge, pcie_link_speed_t speed,
 int
 pci_prd_init(pci_prd_upcalls_t *upcalls)
 {
+	prd_upcalls = upcalls;
+
 	return (0);
 }
 

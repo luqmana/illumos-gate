@@ -16,10 +16,9 @@
 /*
  * A nexus driver for the IOMS units found in AMD Zen-family SoCs, which host
  * the system's PCIe root complexes and, on one instance per socket, the FCH.
- * Each instance identifies its unit in the I/O fabric, owns the generic
- * (non-PCI) address space the fabric routes to that unit, and enumerates the
- * children that decode it: its PCIe root complex, and the fch(4D) nexus on the
- * FCH-bearing instance.
+ * Each instance identifies its unit in the I/O fabric, owns the address space
+ * the fabric routes to that unit, and enumerates the children that decode it:
+ * its PCIe root complex, and the fch(4D) nexus on the FCH-bearing instance.
  *
  * --------------------------------------
  * Physical Organization and Nomenclature
@@ -91,56 +90,69 @@
  * Together nbio, iohub, and iohc identify the PPR register instance for the
  * unit (e.g. instIOHC0_iohub0_nbio0 on Turin).
  *
- * -------------------------
- * Address Space and the FCH
- * -------------------------
+ * -------------
+ * Address Space
+ * -------------
  *
  * The DF routes each region of the physical address space to a single IOMS,
- * and the fabric code partitions each IOMS's share into a pool for its PCIe
- * root complex and a generic (non-PCI) pool for everything else.  This driver
- * owns the generic pool for its unit, and resources flow strictly parent to
- * child from here: the IOMS grants a child a window of that space via a
- * "ranges" property on the child's node, and the child sub-allocates its
- * grant to its own children without ever reaching back into the fabric.
+ * and this driver owns everything routed to its own.  The fabric divides that
+ * space internally between PCI and non-PCI consumers, but it hands us the
+ * union and leaves the division to us (zen_fabric_ioms_grant()), so our two
+ * children draw on one pool rather than two that cannot lend to each other.
  *
- * Only the FCH is granted such a window, our other child, the root complex,
- * draws on the fabric's PCI pool by an entirely different route (see below).
- * The FCH is present on the one IOMS per socket whose IOHC it is attached to
- * (ZEN_IOMS_F_HAS_FCH; IOMS 3 on Milan, 4 on Turin -- always fabric-derived,
- * never assumed).  What the FCH can decode depends on its fabric role, which
- * we communicate to fch(4D) via the "fabric-role" property:
+ * We hold it in busra resource maps on our own node, one per kind of space:
+ * NDI_RA_TYPE_IO, _MEM, _PCI_PREFETCH_MEM, and _PCI_BUSNUM.  Resources flow
+ * strictly parent to child from there: we allocate a child its share and tell
+ * it what it has, and the child sub-allocates to its own children without ever
+ * reaching back here or into the fabric.
  *
- *  - The primary FCH (on the primary I/O die) subtractively decodes the whole
- *    legacy/compatibility space; it is granted everything in the generic
- *    pool.  It also has a small bank of real registers of its own -- the
- *    legacy PC interrupt-routing crossbar at [0xc00, 0xc01] in I/O port space
- *    -- which we expose as a "reg" property so fch(4D) can map it with
+ * The transfer out of the fabric's available lists is destructive and can
+ * happen only once, so the fabric records the grant persistently and hands the
+ * same one back on any subsequent call.  On top of that we simply never detach.
+ *
+ *  - The FCH is present on the one IOMS per socket whose IOHC it is attached
+ *    to (ZEN_IOMS_F_HAS_FCH; IOMS 3 on Milan, 4 on Turin -- always
+ *    fabric-derived, never assumed).  What it can decode depends on its fabric
+ *    role, which we communicate via the "fabric-role" property, and it is
+ *    granted a window as a "ranges" property in fch_rangespec_t form (see
+ *    sys/io/fch/ranges.h).
+ *
+ *    The primary FCH (on the primary I/O die) subtractively decodes the
+ *    architectural compatibility regions: ZEN_IOPORT_COMPAT_SIZE ports at 0
+ *    and ZEN_COMPAT_MMIO_SIZE bytes at ZEN_PHYSADDR_COMPAT_MMIO.
+ *
+ *    The primary FCH also has a small bank of real registers of its own (the
+ *    legacy PC interrupt-routing crossbar at [0xc00, 0xc01] in I/O port space)
+ *    which we expose as a "reg" property so fch(4D) can map it with
  *    ddi_regs_map_setup(9F).  Because we create all of our children, the
  *    format of their properties is ours to choose: "reg" uses the same
- *    fch_rangespec_t format as "ranges" (see sys/io/fch/ranges.h) rather
- *    than the legacy 3-cell struct regspec, and our INITCHILD, bus_map, and
- *    REGSIZE/NREGS resolve everything from the properties directly -- no
- *    sunbus parent-private data is ever built for our children.  Unlike the
- *    legacy format, the rangespec can describe 64-bit regions.
+ *    rangespec format as "ranges" rather than the legacy 3-cell struct
+ *    regspec, and our INITCHILD, bus_map, and REGSIZE/NREGS resolve everything
+ *    from the properties directly -- no sunbus parent-private data is ever
+ *    built for our children.  Unlike the legacy format, the rangespec can
+ *    describe 64-bit regions.
  *
- *  - A secondary FCH (other sockets, if present) decodes only a single 8KiB
+ *    A secondary FCH (other sockets, if present) decodes only a single 8KiB
  *    relocatable MMIO window selected by its FCH::PM::ALTMMIO{BASE,EN} BAR.
- *    Programming that BAR is a routing decision -- structurally the same as
- *    a bridge programming its decode window -- so it happens here, in the
- *    parent: we carve a suitably aligned window out of the generic pool,
- *    program and enable the BAR over SMN, and grant the FCH exactly that
- *    window.  From fch(4D)'s perspective, primary and secondary attachments
- *    are then uniform: the two differ only in the ranges received.  A
- *    secondary FCH has no "reg": nothing else of it is reachable.
+ *    Programming that BAR is a routing decision -- structurally the same as a
+ *    bridge programming its decode window -- so it happens here, in the
+ *    parent: we ask the allocator for an aligned window below 4GiB, program
+ *    and enable the BAR over SMN, and grant the FCH exactly that window.  From
+ *    fch(4D)'s perspective the two attachments are then uniform, differing
+ *    only in the ranges received.  A secondary FCH has no "reg" as nothing else
+ *    of it is reachable.
  *
- * The transfer of the generic pool out of the fabric's available lists is
- * destructive and can happen only once, so the fabric records the grant
- * persistently and hands the same grant back on any subsequent call
- * (zen_fabric_gen_grant()); on top of that, we simply refuse to detach an
- * instance that holds it.  The remainder of a secondary FCH's pool beyond
- * the carved window is currently unused: there are no other consumers of
- * generic space on such an IOMS, and it remains accounted as used in the
- * fabric should that ever change.
+ *  - The root complex is granted everything left once the FCH has taken its
+ *    share, since it is our only other child.  Being PCI, it is told so in
+ *    PCI's own terms (an array of pci_phys_spec plus a pair of bus numbers)
+ *    rather than in the rangespec the FCH gets (see IOMS_PROP_PCI_GRANT in
+ *    sys/io/zen/ioms.h).  misc/pci_boot reads it back through
+ *    pci_prd_find_resource() and lays out the bus from it.
+ *
+ * Two consequences worth noting.  A secondary FCH's IOMS no longer strands the
+ * generic space its FCH does not use: whatever the 8KiB window does not cover
+ * goes to PCI.  And the compile-time PCI/generic proportions in the per-uarch
+ * fabric allocators no longer decide anything here, though they still exist.
  *
  * The FCH is a singleton with no address on any bus so its node has an
  * explicitly empty "unit-address", the property from which our INITCHILD names
@@ -156,9 +168,8 @@
  * node ("pci"), addressed by the fabric's bus number for this unit, and
  * misc/pci_boot does everything else: the properties that make it a PCI root
  * bus, the walk of the buses beneath it, and the assignment and programming of
- * the resources it finds, which come from the fabric's PCI pool via
- * pci_prd_find_resource() rather than from the generic pool we hold.  See
- * pci_boot_rc_config() in <sys/pci_boot.h>.
+ * the resources it finds, which it reads back out of our grant via
+ * pci_prd_find_resource().  See pci_boot_rc_config() in <sys/pci_boot.h>.
  */
 
 #include <sys/cmn_err.h>
@@ -172,7 +183,9 @@
 #include <sys/debug.h>
 #include <sys/kmem.h>
 #include <sys/memlist.h>
+#include <sys/memlist_impl.h>
 #include <sys/modctl.h>
+#include <sys/pci.h>
 #include <sys/pci_boot.h>
 #include <sys/stdbool.h>
 #include <sys/sunddi.h>
@@ -190,6 +203,7 @@
 #include <sys/io/zen/fabric.h>
 #include <sys/io/zen/fabric_limits.h>
 #include <sys/io/zen/ioms.h>
+#include <sys/io/zen/physaddrs.h>
 #include <sys/io/zen/smn.h>
 
 /*
@@ -232,66 +246,90 @@ ioms_match_cb(zen_ioms_t *ioms, void *arg)
 }
 
 /*
- * Add the contents of memlist ml to the set of ranges frp, assuming address
- * space as.  The return value is the number of ranges used, which may be
- * smaller than the number of memlist entries: adjacent spans are coalesced
- * into a single range and empty spans are discarded.  The memlist itself is
- * owned by the fabric and left intact.
+ * Helper to convert a given address space, base & length into fch_rangespec_t.
  */
-static uint_t
-ioms_memlist_to_ranges(const struct memlist *ml, fch_rangespec_t *frp,
-    fch_addrsp_t as)
+static void
+ioms_fch_range_set(fch_rangespec_t *frp, fch_addrsp_t as, uint64_t base,
+    uint64_t len)
 {
-	uint_t ridx = 0;
+	VERIFY3U(len, >, 0);
+	VERIFY3U(base + (len - 1), >=, base);
 
-	while (ml != NULL) {
-		uint64_t size, end;
-
-		if (ml->ml_size == 0) {
-			ml = ml->ml_next;
-			continue;
-		}
-
-		/* Overflowing 64-bit space is always a bug. */
-		VERIFY3U(ml->ml_address + (ml->ml_size - 1), >=,
-		    ml->ml_address);
-
-		size = ml->ml_size;
-		end = ml->ml_address + (ml->ml_size - 1);
-
-		frp[ridx].fr_physlo = (uint32_t)ml->ml_address;
-		frp[ridx].fr_physhi = (uint32_t)(ml->ml_address >> 32);
-
-		/* Check for contiguous spans and coalesce. */
-		while ((ml = ml->ml_next) != NULL &&
-		    ml->ml_address == end + 1) {
-			VERIFY3U(size, <, size + ml->ml_size);
-			VERIFY3U(end, <, end + ml->ml_size);
-
-			size += ml->ml_size;
-			end += ml->ml_size;
-		}
-
-		/* Close out and count this range. */
-		frp[ridx].fr_sizelo = (uint32_t)size;
-		frp[ridx].fr_sizehi = (uint32_t)(size >> 32);
-		frp[ridx].fr_addrsp = as;
-		ridx++;
-	}
-
-	return (ridx);
+	frp->fr_addrsp = as;
+	frp->fr_physlo = (uint32_t)base;
+	frp->fr_physhi = (uint32_t)(base >> 32);
+	frp->fr_sizelo = (uint32_t)len;
+	frp->fr_sizehi = (uint32_t)(len >> 32);
 }
 
 /*
- * If this IOMS has the FCH attached, take ownership of the generic address
- * space the fabric routes to us and derive the windows to be granted to the
- * fch child, as described in the theory statement.  Failure here means the
- * FCH goes unrepresented, which is reported but does not fail our own attach.
+ * The busra map types we get from the fabric and allocate to our children.
+ */
+static const char *ioms_ra_types[] = {
+	NDI_RA_TYPE_IO,
+	NDI_RA_TYPE_MEM,
+	NDI_RA_TYPE_PCI_PREFETCH_MEM,
+	NDI_RA_TYPE_PCI_BUSNUM
+};
+
+/*
+ * Take ownership of everything the fabric routes to this IOMS and put it into
+ * resource maps, from which our children are granted their shares.  We are the
+ * only allocator of this space: the fabric divides it internally between PCI
+ * and non-PCI consumers, but hands us the union and leaves the division to us,
+ * so the FCH and the root complex draw on one pool rather than two that cannot
+ * lend to each other.
  *
- * Everything here is idempotent across a repeated or retried attach: the
- * fabric returns the recorded grant, the window carved for a secondary FCH is
- * a deterministic function of it, and reprogramming the BAR with the same
- * value is harmless.
+ * Idempotent across a repeated attach: the fabric returns the same recorded
+ * grant, and a map that already exists is left as it is.
+ */
+static int
+ioms_rsrc_init(ioms_t *iop)
+{
+	dev_info_t *dip = iop->io_dip;
+	const struct memlist *ml[ARRAY_SIZE(ioms_ra_types)], *m;
+	uint_t maps = 0;
+
+	CTASSERT(ARRAY_SIZE(ioms_ra_types) == 4);
+
+	zen_fabric_ioms_grant(iop->io_ioms, &ml[0], &ml[1], &ml[2], &ml[3]);
+
+	for (uint_t i = 0; i < ARRAY_SIZE(ioms_ra_types); i++) {
+		if (ndi_ra_map_setup(dip, (char *)ioms_ra_types[i]) !=
+		    NDI_SUCCESS) {
+			dev_err(dip, CE_WARN, "failed to create the '%s' "
+			    "resource map", ioms_ra_types[i]);
+			goto fail;
+		}
+		maps++;
+
+		for (m = ml[i]; m != NULL; m = m->ml_next) {
+			if (ndi_ra_free(dip, m->ml_address, m->ml_size,
+			    (char *)ioms_ra_types[i], 0) != NDI_SUCCESS) {
+				dev_err(dip, CE_WARN, "failed to add [0x%lx, "
+				    "0x%lx) to the '%s' resource map",
+				    m->ml_address, m->ml_address + m->ml_size,
+				    ioms_ra_types[i]);
+				goto fail;
+			}
+		}
+	}
+
+	return (DDI_SUCCESS);
+
+fail:
+	while (maps > 0) {
+		(void) ndi_ra_map_destroy(dip, (char *)ioms_ra_types[--maps]);
+	}
+
+	return (DDI_FAILURE);
+}
+
+/*
+ * If this IOMS has the FCH attached, allocate the regions expected by the
+ * fch(4D) driver out of the address space the fabric routed to us.
+ * Failure here means the FCH goes unrepresented, which is reported but does not
+ * fail our own attach.
  */
 static void
 ioms_fch_init(ioms_t *iop)
@@ -300,10 +338,11 @@ ioms_fch_init(ioms_t *iop)
 	zen_iodie_t *iodie = zen_ioms_iodie(ioms);
 	const smn_reg_t enreg = fch_pmio_smn_reg(D_FCH_PMIO_ALTMMIOEN, 0);
 	const smn_reg_t bar = fch_pmio_smn_reg(D_FCH_PMIO_ALTMMIOBASE, 0);
-	const struct memlist *ioml, *mmml;
-	fch_rangespec_t *frp, *ufrp = NULL;
-	size_t mlcount;
-	uint_t rangecount, usable = 0;
+	fch_rangespec_t *frp = NULL, *ufrp = NULL;
+	ndi_ra_request_t rr;
+	uint64_t base, len;
+	size_t frp_sz = 0;
+	uint_t usable = 0;
 	bool primary;
 
 	if ((zen_ioms_flags(ioms) & ZEN_IOMS_F_HAS_FCH) == 0)
@@ -330,35 +369,63 @@ ioms_fch_init(ioms_t *iop)
 		}
 	}
 
-	zen_fabric_gen_grant(ioms, &ioml, &mmml);
-	mlcount = memlist_count(ioml) + memlist_count(mmml);
-	if (mlcount == 0) {
-		dev_err(iop->io_dip, CE_WARN, "no generic address space is "
-		    "routed to this IOMS; not enumerating the FCH");
-		return;
-	}
-
-	frp = kmem_zalloc(sizeof (fch_rangespec_t) * mlcount, KM_SLEEP);
-	rangecount = ioms_memlist_to_ranges(ioml, frp, FA_LEGACY);
-	rangecount += ioms_memlist_to_ranges(mmml, frp + rangecount, FA_MMIO);
-
 	if (primary) {
 		/*
-		 * The primary FCH subtractively decodes everything the DF
-		 * routes this way, so it is granted the whole pool.
+		 * The primary FCH subtractively decodes the architectural
+		 * compatibility regions, and nothing else.  Ask for exactly
+		 * those as fch(4D) describes every one of its children as an
+		 * offset from ZEN_PHYSADDR_COMPAT_MMIO.
 		 */
+		static const struct {
+			fch_addrsp_t	fa;
+			uint64_t	base;
+			uint64_t	size;
+		} compat[] = {
+			{ FA_LEGACY, 0, ZEN_IOPORT_COMPAT_SIZE },
+			{ FA_MMIO, ZEN_PHYSADDR_COMPAT_MMIO,
+			    ZEN_COMPAT_MMIO_SIZE }
+		};
+
+		frp_sz = sizeof (fch_rangespec_t) * ARRAY_SIZE(compat);
+		frp = kmem_zalloc(frp_sz, KM_SLEEP);
+
+		for (uint_t i = 0; i < ARRAY_SIZE(compat); i++) {
+			bzero(&rr, sizeof (rr));
+			rr.ra_flags = NDI_RA_ALLOC_SPECIFIED;
+			rr.ra_addr = compat[i].base;
+			rr.ra_len = compat[i].size;
+
+			if (ndi_ra_alloc(iop->io_dip, &rr, &base, &len,
+			    fch_addrsp_to_ndi_ra_type(compat[i].fa), 0) !=
+			    NDI_SUCCESS) {
+				dev_err(iop->io_dip, CE_WARN, "the "
+				    "compatibility %s region [0x%lx, 0x%lx) is "
+				    "not routed here or is already in use; not "
+				    "enumerating the FCH",
+				    compat[i].fa == FA_LEGACY ? "I/O" : "MMIO",
+				    compat[i].base,
+				    compat[i].base + compat[i].size);
+				kmem_free(frp, frp_sz);
+				return;
+			}
+
+			ioms_fch_range_set(frp + i, compat[i].fa, base, len);
+		}
+
 		ufrp = frp;
-		usable = rangecount;
+		usable = ARRAY_SIZE(compat);
 	} else {
+		uint32_t val;
+
 		/*
 		 * A secondary FCH decodes only the 8KiB, 16-bit-aligned
-		 * window programmed into its ALTMMIO BAR.  Find room for the
-		 * window, program the BAR, and narrow the grant to exactly
-		 * that window.  We would love to put this thing in 64-bit
-		 * space but we cannot: while the BAR has a 64-bit option,
-		 * setting it puts the region at 0xffff_ffff_XXXX_0000, an
-		 * address this CPU cannot generate.  Sometimes all you can do
-		 * is laugh.
+		 * window programmed into its ALTMMIO BAR.  We would love to
+		 * put this thing in 64-bit space but we cannot: while the BAR
+		 * has a 64-bit option, setting it puts the region at
+		 * 0xffff_ffff_XXXX_0000, an address this CPU cannot generate.
+		 * Sometimes all you can do is laugh.  So the request is bounded
+		 * below 4GiB, and the allocator finds and aligns the window
+		 * for us.
 		 *
 		 * XXX It is also possible to route legacy I/O space to a
 		 * secondary FCH and in turn allocate it to children just as a
@@ -366,65 +433,52 @@ ioms_fch_init(ioms_t *iop)
 		 * need to improve this.  See also fch_parent_base() in
 		 * fch(4D).
 		 */
-		for (uint_t ridx = 0; ridx < rangecount; ridx++) {
-			uint32_t val;
-			uint64_t addr, size, end;
+		frp_sz = sizeof (fch_rangespec_t);
+		frp = kmem_zalloc(frp_sz, KM_SLEEP);
 
-			if (frp[ridx].fr_addrsp != FA_MMIO)
-				continue;
-			if (frp[ridx].fr_physhi != 0)
-				continue;
-			size = fch_rangespec_size(frp + ridx);
+		bzero(&rr, sizeof (rr));
+		rr.ra_flags = NDI_RA_ALLOC_BOUNDED;
+		rr.ra_len = FCH_PMIO_ALTMMIOBASE_SIZE;
+		rr.ra_align_mask =
+		    (1UL << FCH_PMIO_ALTMMIOBASE_SHIFT) - 1;
+		rr.ra_boundbase = 0;
+		rr.ra_boundlen = UINT32_MAX;
 
-			addr = fch_rangespec_addr(frp + ridx);
-			end = addr + (size - 1);
-			addr = P2ROUNDUP_TYPED(addr,
-			    (1UL << FCH_PMIO_ALTMMIOBASE_SHIFT), uint64_t);
-
-			if (addr + (FCH_PMIO_ALTMMIOBASE_SIZE - 1) > end)
-				continue;
-
-			ufrp = frp + ridx;
-			usable = 1;
-
-			ufrp->fr_physlo = (uint32_t)addr;
-			ufrp->fr_sizelo = FCH_PMIO_ALTMMIOBASE_SIZE;
-			ufrp->fr_sizehi = 0;
-
-			val = zen_iodie_read(iodie, enreg);
-			if (FCH_PMIO_ALTMMIOEN_GET_EN(val) != 0) {
-				val = FCH_PMIO_ALTMMIOEN_SET_EN(val, 0);
-				zen_iodie_write(iodie, enreg, val);
-			}
-
-			val = zen_iodie_read(iodie, bar);
-			val = FCH_PMIO_ALTMMIOBASE_SET(val,
-			    (uint32_t)addr >> FCH_PMIO_ALTMMIOBASE_SHIFT);
-			zen_iodie_write(iodie, bar, val);
-
-			val = FCH_PMIO_ALTMMIOEN_SET_EN(0, 1);
-			val = FCH_PMIO_ALTMMIOEN_SET_WIDTH(val,
-			    FCH_PMIO_ALTMMIOEN_WIDTH_32);
-			zen_iodie_write(iodie, enreg, val);
-
-			break;
+		if (ndi_ra_alloc(iop->io_dip, &rr, &base, &len,
+		    NDI_RA_TYPE_MEM, 0) != NDI_SUCCESS) {
+			dev_err(iop->io_dip, CE_WARN, "no 32-bit MMIO window "
+			    "is available for the FCH; not enumerating it");
+			kmem_free(frp, frp_sz);
+			return;
 		}
-	}
 
-	if (ufrp == NULL || usable == 0) {
-		dev_err(iop->io_dip, CE_WARN, "no usable address space for "
-		    "the FCH; not enumerating it");
-		kmem_free(frp, sizeof (fch_rangespec_t) * mlcount);
-		return;
+		ioms_fch_range_set(frp, FA_MMIO, base, len);
+		ufrp = frp;
+		usable = 1;
+
+		val = zen_iodie_read(iodie, enreg);
+		if (FCH_PMIO_ALTMMIOEN_GET_EN(val) != 0) {
+			val = FCH_PMIO_ALTMMIOEN_SET_EN(val, 0);
+			zen_iodie_write(iodie, enreg, val);
+		}
+
+		val = zen_iodie_read(iodie, bar);
+		val = FCH_PMIO_ALTMMIOBASE_SET(val,
+		    (uint32_t)base >> FCH_PMIO_ALTMMIOBASE_SHIFT);
+		zen_iodie_write(iodie, bar, val);
+
+		val = FCH_PMIO_ALTMMIOEN_SET_EN(0, 1);
+		val = FCH_PMIO_ALTMMIOEN_SET_WIDTH(val,
+		    FCH_PMIO_ALTMMIOEN_WIDTH_32);
+		zen_iodie_write(iodie, enreg, val);
 	}
 
 	iop->io_fch_primary = primary;
 	iop->io_fch_nranges = usable;
-	iop->io_fch_ranges =
-	    kmem_alloc(sizeof (fch_rangespec_t) * usable, KM_SLEEP);
-	bcopy(ufrp, iop->io_fch_ranges, sizeof (fch_rangespec_t) * usable);
+	iop->io_fch_ranges = kmem_alloc(frp_sz, KM_SLEEP);
+	bcopy(ufrp, iop->io_fch_ranges, frp_sz);
 
-	kmem_free(frp, sizeof (fch_rangespec_t) * mlcount);
+	kmem_free(frp, frp_sz);
 }
 
 static int
@@ -473,6 +527,15 @@ ioms_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	iop->io_dip = dip;
 	iop->io_ioms = im.im_ioms;
 
+	/*
+	 * Grab the everything routed to this IOMS from the fabric and create
+	 * busra maps of them before we set up any children.
+	 */
+	if (ioms_rsrc_init(iop) != DDI_SUCCESS) {
+		ddi_soft_state_free(ioms_state, inst);
+		return (DDI_FAILURE);
+	}
+
 	ioms_fch_init(iop);
 
 	ddi_report_dev(dip);
@@ -481,38 +544,21 @@ ioms_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 }
 
 static int
-ioms_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
+ioms_detach(dev_info_t *dip __unused, ddi_detach_cmd_t cmd)
 {
-	ioms_t *iop;
-	int inst;
-
-	switch (cmd) {
-	case DDI_DETACH:
-		break;
-	case DDI_SUSPEND:
+	if (cmd == DDI_SUSPEND)
 		return (DDI_SUCCESS);
-	default:
-		return (DDI_FAILURE);
-	}
-
-	inst = ddi_get_instance(dip);
-	iop = ddi_get_soft_state(ioms_state, inst);
-	if (iop == NULL || iop->io_dip != dip)
-		return (DDI_FAILURE);
 
 	/*
-	 * An instance that owns the FCH's address space grant hosts the
-	 * console and boot-critical peripherals below it.  While a re-attach
-	 * would recover the grant from the fabric, there is nothing useful to
-	 * be gained from allowing this nexus to detach and much to lose if
-	 * some part of the re-attach path fails.
+	 * We do not detach.  Every instance holds the address space the fabric
+	 * routes to it, in resource maps its children have been granted from
+	 * (and on the FCH-bearing instance, the console and the boot-critical
+	 * peripherals below it).  A re-attach would recover the grant from the
+	 * fabric, but there is nothing useful to be gained from letting this
+	 * nexus go and much to lose if any part of that path fails.  It also
+	 * means the maps live exactly as long as the node.
 	 */
-	if (iop->io_fch_nranges != 0)
-		return (DDI_FAILURE);
-
-	ddi_soft_state_free(ioms_state, inst);
-
-	return (DDI_SUCCESS);
+	return (DDI_FAILURE);
 }
 
 /*
@@ -615,6 +661,157 @@ fail:
 }
 
 /*
+ * Take everything left in one of our maps.  There is no way to ask busra what
+ * is free, but an unbounded partial request always yields the largest span it
+ * has and removes it, so repeating that until nothing comes back drains the
+ * map into a list we can describe.  That is only reasonable because this
+ * happens once, when the root complex is granted the whole of what remains
+ * after the FCH.
+ */
+static struct memlist *
+ioms_rsrc_drain(dev_info_t *dip, char *type)
+{
+	struct memlist *ml = NULL;
+
+	for (;;) {
+		ndi_ra_request_t rr;
+		uint64_t base, len;
+		int ret;
+
+		bzero(&rr, sizeof (rr));
+		rr.ra_flags = NDI_RA_ALLOC_PARTIAL_OK;
+		rr.ra_len = UINT64_MAX;
+
+		ret = ndi_ra_alloc(dip, &rr, &base, &len, type, 0);
+		if ((ret != NDI_SUCCESS && ret != NDI_RA_PARTIAL_REQ) ||
+		    len == 0) {
+			break;
+		}
+
+		(void) memlist_rsrc_add(base, len, &ml);
+	}
+
+	return (ml);
+}
+
+/*
+ * Describe a granted span the way PCI describes address space, so that what we
+ * hand our root complex is already in the form everything below it speaks.
+ */
+static void
+ioms_pci_spec_set(pci_regspec_t *ps, uint32_t space, uint64_t base,
+    uint64_t len)
+{
+	uint32_t phys_hi = space;
+
+	VERIFY3U(len, >, 0);
+
+	/*
+	 * For non-I/O addresses, we determine MEM32/64 from the given base/len.
+	 */
+	if ((space & PCI_ADDR_MASK) != PCI_ADDR_IO) {
+		phys_hi &= ~PCI_ADDR_MASK;
+		phys_hi |= (base + len >= UINT32_MAX) ?
+		    PCI_ADDR_MEM64 : PCI_ADDR_MEM32;
+	}
+
+	ps->pci_phys_hi = phys_hi;
+	ps->pci_phys_mid = (uint32_t)(base >> 32);
+	ps->pci_phys_low = (uint32_t)base;
+	ps->pci_size_hi = (uint32_t)(len >> 32);
+	ps->pci_size_low = (uint32_t)len;
+}
+
+/*
+ * Hand the root complex the address space it may assign, in the properties
+ * <sys/io/zen/ioms.h> describes.  This is the PCI counterpart of the "ranges"
+ * we give the FCH: the child is told what it has, and neither reaches back
+ * here nor into the fabric for more.
+ */
+static int
+ioms_rc_grant(ioms_t *iop, dev_info_t *cdip)
+{
+	static const struct {
+		char		*type;
+		uint32_t	phys_hi;
+	} grants[] = {
+		{ NDI_RA_TYPE_IO, PCI_ADDR_IO },
+		{ NDI_RA_TYPE_MEM, PCI_ADDR_MEM32 },
+		{ NDI_RA_TYPE_PCI_PREFETCH_MEM, PCI_ADDR_MEM32|PCI_PREFETCH_B }
+	};
+	struct memlist *ml[ARRAY_SIZE(grants)];
+	pci_regspec_t *ps = NULL;
+	struct memlist *busml;
+	uint_t nspec = 0, i = 0;
+	int ret = NDI_FAILURE;
+
+	for (uint_t g = 0; g < ARRAY_SIZE(grants); g++) {
+		ml[g] = ioms_rsrc_drain(iop->io_dip, grants[g].type);
+		nspec += memlist_count(ml[g]);
+	}
+
+	if (nspec > 0) {
+		ps = kmem_zalloc(sizeof (pci_regspec_t) * nspec, KM_SLEEP);
+		for (uint_t g = 0; g < ARRAY_SIZE(grants); g++) {
+			for (struct memlist *m = ml[g]; m != NULL;
+			    m = m->ml_next) {
+				ioms_pci_spec_set(&ps[i++], grants[g].phys_hi,
+				    m->ml_address, m->ml_size);
+			}
+		}
+		VERIFY3U(i, ==, nspec);
+
+		if (ndi_prop_update_int_array(DDI_DEV_T_NONE, cdip,
+		    IOMS_PROP_PCI_GRANT, (int *)ps,
+		    nspec * (sizeof (pci_regspec_t) / sizeof (int))) !=
+		    NDI_SUCCESS) {
+			dev_err(iop->io_dip, CE_WARN, "failed to create root "
+			    "complex '%s' property", IOMS_PROP_PCI_GRANT);
+			goto out;
+		}
+	}
+
+	/*
+	 * Bus numbers don't fit neatly into pci_regspec_t so instead we treat
+	 * them as a pair the way "bus-range" does.  We expect one contiguous
+	 * run as anything else would mean the fabric routed a split range
+	 * to a single root complex, which cannot be expressed.
+	 */
+	busml = ioms_rsrc_drain(iop->io_dip, NDI_RA_TYPE_PCI_BUSNUM);
+	if (busml != NULL) {
+		int busrange[2];
+
+		if (busml->ml_next != NULL) {
+			dev_err(iop->io_dip, CE_WARN, "bus numbers routed "
+			    "here are not contiguous - granting only the "
+			    "first run");
+		}
+
+		busrange[0] = (int)busml->ml_address;
+		busrange[1] = (int)(busml->ml_address + busml->ml_size - 1);
+
+		if (ndi_prop_update_int_array(DDI_DEV_T_NONE, cdip,
+		    IOMS_PROP_BUS_GRANT, busrange, 2) != NDI_SUCCESS) {
+			dev_err(iop->io_dip, CE_WARN, "failed to create root "
+			    "complex '%s' property", IOMS_PROP_BUS_GRANT);
+			memlist_rsrc_free(&busml);
+			goto out;
+		}
+	}
+	memlist_rsrc_free(&busml);
+
+	ret = NDI_SUCCESS;
+
+out:
+	if (ps != NULL)
+		kmem_free(ps, sizeof (pci_regspec_t) * nspec);
+	for (uint_t g = 0; g < ARRAY_SIZE(grants); g++)
+		memlist_rsrc_free(&ml[g]);
+
+	return (ret);
+}
+
+/*
  * Idempotently create the node for this IOMS's PCIe root complex and have the
  * boot enumeration library fill in everything below it.  Every IOMS hosts an
  * IOHC that acts as a root complex with a root bus of its own, so unlike the
@@ -655,6 +852,14 @@ ioms_config_rc(ioms_t *iop)
 		    "'unit-address' property");
 		goto fail;
 	}
+
+	/*
+	 * Grant it everything we have left.  The FCH took its share when we
+	 * attached, and the root complex is our only other child, so whatever
+	 * remains in our maps is its to hand out.
+	 */
+	if (ioms_rc_grant(iop, cdip) != NDI_SUCCESS)
+		goto fail;
 
 	/*
 	 * Configure the RC and any buses/devices under it.  This will also

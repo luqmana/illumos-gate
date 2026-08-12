@@ -3893,19 +3893,6 @@ zen_fabric_find_ioms_cb(zen_ioms_t *ioms, void *arg)
 	return (0);
 }
 
-static int
-zen_fabric_find_ioms_by_bus_cb(zen_ioms_t *ioms, void *arg)
-{
-	zen_fabric_find_ioms_t *zffi = arg;
-
-	if (zffi->zffi_dest == ioms->zio_pci_busno) {
-		zffi->zffi_ioms = ioms;
-		return (1);
-	}
-
-	return (0);
-}
-
 zen_ioms_t *
 zen_fabric_find_ioms(zen_fabric_t *fabric, uint32_t destid)
 {
@@ -3915,20 +3902,6 @@ zen_fabric_find_ioms(zen_fabric_t *fabric, uint32_t destid)
 	};
 
 	(void) zen_fabric_walk_ioms(fabric, zen_fabric_find_ioms_cb,
-	    &zffi);
-
-	return (zffi.zffi_ioms);
-}
-
-zen_ioms_t *
-zen_fabric_find_ioms_by_bus(zen_fabric_t *fabric, uint32_t pci_bus)
-{
-	zen_fabric_find_ioms_t zffi = {
-	    .zffi_dest = pci_bus,
-	    .zffi_ioms = NULL,
-	};
-
-	(void) zen_fabric_walk_ioms(fabric, zen_fabric_find_ioms_by_bus_cb,
 	    &zffi);
 
 	return (zffi.zffi_ioms);
@@ -4155,22 +4128,14 @@ zen_fabric_dma_attr(ddi_dma_attr_t *attr)
 	attr->dma_attr_flags = 0;
 }
 
-static zen_ioms_rsrc_t
-zen_ioms_prd_to_rsrc(pci_prd_rsrc_t rsrc)
-{
-	switch (rsrc) {
-	case PCI_PRD_R_IO:
-		return (ZIR_PCI_LEGACY);
-	case PCI_PRD_R_MMIO:
-		return (ZIR_PCI_MMIO);
-	case PCI_PRD_R_PREFETCH:
-		return (ZIR_PCI_PREFETCH);
-	case PCI_PRD_R_BUS:
-		return (ZIR_PCI_BUS);
-	default:
-		return (ZIR_NONE);
-	}
-}
+typedef enum zen_ioms_rsrc {
+	ZIR_PCI_LEGACY,
+	ZIR_PCI_MMIO,
+	ZIR_PCI_PREFETCH,
+	ZIR_PCI_BUS,
+	ZIR_GEN_LEGACY,
+	ZIR_GEN_MMIO
+} zen_ioms_rsrc_t;
 
 static struct memlist *
 zen_fabric_rsrc_subsume_locked(zen_ioms_memlists_t *imp, zen_ioms_rsrc_t rsrc)
@@ -4236,81 +4201,34 @@ zen_fabric_rsrc_subsume_locked(zen_ioms_memlists_t *imp, zen_ioms_rsrc_t rsrc)
 	return (ret);
 }
 
-static struct memlist *
-zen_fabric_rsrc_subsume(zen_ioms_t *ioms, zen_ioms_rsrc_t rsrc)
-{
-	zen_ioms_memlists_t *imp;
-	struct memlist *ret;
-
-	ASSERT(ioms != NULL);
-
-	imp = &ioms->zio_memlists;
-	mutex_enter(&imp->zim_lock);
-	ret = zen_fabric_rsrc_subsume_locked(imp, rsrc);
-	mutex_exit(&imp->zim_lock);
-
-	return (ret);
-}
-
 /*
- * This is a request that we take resources from a given IOMS root port and
- * basically give what remains and hasn't been allocated to PCI. This is a bit
- * of a tricky process as we want to both:
+ * This is for describing all the available legacy IO and MMIO space that we've
+ * routed to this IOMS.  The intent is that the caller (the nexus representing
+ * this IOMS in the device tree) will pass the space on to the child that
+ * decodes it (today the FCH, for the IOMSs that have one attached and the RC),
+ * which will feed it to busra or the moral equivalent.
  *
- *  1. Give everything that's currently available to PCI; however, it needs
- *     memlists that are allocated with kmem due to how PCI memlists work.
- *  2. We need to move everything that we're giving to PCI into our used list
- *     just for our own tracking purposes.
- */
-struct memlist *
-zen_fabric_pci_subsume(uint32_t bus, pci_prd_rsrc_t rsrc)
-{
-	zen_ioms_t *ioms;
-	zen_ioms_rsrc_t ir;
-
-	ioms = zen_fabric_find_ioms_by_bus(&zen_fabric, bus);
-	if (ioms == NULL) {
-		return (NULL);
-	}
-
-	ir = zen_ioms_prd_to_rsrc(rsrc);
-
-	return (zen_fabric_rsrc_subsume(ioms, ir));
-}
-
-/*
- * This is for the rest of the available legacy IO and MMIO space that we've set
- * aside for things that are not PCI.  The intent is that the caller -- the
- * nexus representing this IOMS in the device tree -- will pass the space on to
- * the child that decodes it (today the FCH, for the IOMSs that have one
- * attached), which will feed it to busra or the moral equivalent.  While this
- * is presently used only for the FCH, in principle it could be applied to
- * other users as well, including IOAPICs and IOMMUs that are present in all NB
- * instances.  For now this is really about getting all this out of earlyboot
- * context where we don't have modules like rootnex and busra and into places
- * where it's better managed; in this it has the same purpose as its PCI
- * counterpart above.
- *
- * Unlike the PCI counterpart, this transfer is idempotent: the destructive
- * move from the available pools happens only on the first call and the
- * resulting grant is recorded in the fabric so that repeated calls (a retried
- * or repeated nexus attach) observe the same grant.  The returned memlists are
- * owned by the fabric, live for the lifetime of the system, and must not be
- * modified or freed by callers; either may be NULL if no resources of that
- * type were routed to this IOMS.
+ * This transfer is idempotent: the destructive move from the available pools
+ * happens only on the first call and the resulting grant is recorded in the
+ * fabric so that repeated calls (a retried or repeated nexus attach) observe
+ * the same grant.  The returned memlists are owned by the fabric, live for the
+ * lifetime of the system, and must not be modified or freed by callers; either
+ * may be NULL if no resources of that type were routed to this IOMS.
  *
  * Curiously, AMD's documentation indicates that each of the PCI and non-PCI
  * regions associated with each NB instance must be contiguous, but there's no
  * hardware reason for that beyond the mechanics of assigning resources to PCIe
- * root ports.  So if we were to improve busra to manage these resources
- * globally instead of making PCI its own separate pool, we wouldn't need this
- * clumsy non-PCI reservation and could instead assign resources globally with
- * respect to each NB instance regardless of the requesting device type.  The
- * future's so bright, we gotta wear shades.
+ * root ports.  So the split we make below between PCI and non-PCI is ours, not
+ * the hardware's, and there is no reason for it to be visible outside this
+ * file: we hand the whole of an IOMS's routed space to the nexus that owns it
+ * and let that nexus assign from it regardless of the requesting device type.
+ * What remains of the "clumsy non-PCI reservation" is that the two pools are
+ * still sized here before being reunited.
  */
 void
-zen_fabric_gen_grant(zen_ioms_t *ioms, const struct memlist **iolp,
-    const struct memlist **mmiolp)
+zen_fabric_ioms_grant(zen_ioms_t *ioms, const struct memlist **iolp,
+    const struct memlist **mmiolp, const struct memlist **pmemlp,
+    const struct memlist **buslp)
 {
 	zen_ioms_memlists_t *imp;
 
@@ -4318,15 +4236,37 @@ zen_fabric_gen_grant(zen_ioms_t *ioms, const struct memlist **iolp,
 
 	imp = &ioms->zio_memlists;
 	mutex_enter(&imp->zim_lock);
-	if (!imp->zim_gen_granted) {
-		imp->zim_io_gen_grant =
+	if (!imp->zim_granted) {
+		struct memlist *pci;
+
+		/*
+		 * Legacy I/O and MMIO are each divided in two here, but that
+		 * division is ours rather than the hardware's (see the
+		 * discussion above) and it is not relevant to the nexus.  Hand
+		 * over the union and let it decide who gets what.
+		 */
+		imp->zim_io_grant =
 		    zen_fabric_rsrc_subsume_locked(imp, ZIR_GEN_LEGACY);
-		imp->zim_mmio_gen_grant =
+		pci = zen_fabric_rsrc_subsume_locked(imp, ZIR_PCI_LEGACY);
+		(void) memlist_rsrc_subsume(&pci, &imp->zim_io_grant);
+
+		imp->zim_mmio_grant =
 		    zen_fabric_rsrc_subsume_locked(imp, ZIR_GEN_MMIO);
-		imp->zim_gen_granted = true;
+		pci = zen_fabric_rsrc_subsume_locked(imp, ZIR_PCI_MMIO);
+		(void) memlist_rsrc_subsume(&pci, &imp->zim_mmio_grant);
+
+		/* These two have no generic counterpart. */
+		imp->zim_pmem_grant =
+		    zen_fabric_rsrc_subsume_locked(imp, ZIR_PCI_PREFETCH);
+		imp->zim_bus_grant =
+		    zen_fabric_rsrc_subsume_locked(imp, ZIR_PCI_BUS);
+
+		imp->zim_granted = true;
 	}
-	*iolp = imp->zim_io_gen_grant;
-	*mmiolp = imp->zim_mmio_gen_grant;
+	*iolp = imp->zim_io_grant;
+	*mmiolp = imp->zim_mmio_grant;
+	*pmemlp = imp->zim_pmem_grant;
+	*buslp = imp->zim_bus_grant;
 	mutex_exit(&imp->zim_lock);
 }
 
