@@ -19,7 +19,7 @@
 # CDDL HEADER END
 #
 #
-# uts/intel/pci_autoconfig/Makefile
+# uts/i86xpv/pci_autoconfig/Makefile
 # Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
@@ -30,7 +30,7 @@
 #	This makefile drives the production of the PCI autoconfiguration
 #	kernel module.
 #
-#	intel platform dependent
+#	i86xpv platform dependent
 #
 
 #
@@ -43,13 +43,12 @@ UTSBASE	= ../..
 #
 MODULE		= pci_autoconfig
 OBJECTS		= $(PCI_AUTOCONFIG_OBJS:%=$(OBJS_DIR)/%)
-ROOTMODULE	= $(ROOT_MISC_DIR)/$(MODULE)
-INC_PATH	+= -I$(UTSBASE)/i86pc
+ROOTMODULE	= $(ROOT_PSM_MISC_DIR)/$(MODULE)
 
 #
 #	Include common rules.
 #
-include $(UTSBASE)/intel/Makefile.intel
+include $(UTSBASE)/i86xpv/Makefile.i86xpv
 
 #
 #	Define targets
@@ -81,4 +80,4 @@ install:	$(INSTALL_DEPS)
 #
 #	Include common targets.
 #
-include $(UTSBASE)/intel/Makefile.targ
+include $(UTSBASE)/i86xpv/Makefile.targ

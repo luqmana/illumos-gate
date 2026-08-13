@@ -155,7 +155,6 @@ PCI_PCINEXUS_OBJS += pci_pci.o
 PCIEB_OBJS += pcieb_x86.o
 PIT_BEEP_OBJS += pit_beep.o
 POWER_OBJS += power.o
-PCI_AUTOCONFIG_OBJS += pci_autoconfig.o
 PCI_BOOT_OBJS += pci_boot_mod.o pci_boot.o pcie_boot.o
 RADEON_OBJS += r300_cmdbuf.o radeon_cp.o radeon_drv.o \
 			radeon_state.o radeon_irq.o radeon_mem.o
