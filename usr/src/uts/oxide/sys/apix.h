@@ -21,7 +21,7 @@
 /*
  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2017 Joyent, Inc.
- * Copyright 2022 Oxide Computer Co.
+ * Copyright 2026 Oxide Computer Co.
  */
 
 #ifndef __SYS_APIX_APIX_H
@@ -301,8 +301,7 @@ extern int apix_add_avintr(void *intr_id, int ipl, avfunc xxintr, char *name,
 extern void apix_rem_avintr(void *intr_id, int ipl, avfunc xxintr,
     int virt_vect);
 
-extern uint32_t apix_bind_cpu_locked(dev_info_t *dip);
-extern apix_vector_t *apix_rebind(apix_vector_t *vecp, processorid_t tocpu,
+extern apix_vector_t *apix_rebind(apix_vector_t *vecp, processorid_t newcpu,
     int count);
 
 extern uchar_t apix_alloc_ipi(int ipl);

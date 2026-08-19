@@ -383,7 +383,6 @@ typedef struct apic_irq {
 	void		*airq_intrmap_private; /* intr remap private data */
 } apic_irq_t;
 
-#define	IRQ_USER_BOUND	0x80000000 /* user requested bind if set in airq_cpu */
 #define	IRQ_UNBOUND	(uint32_t)-1	/* set in airq_cpu and airq_temp_cpu */
 #define	IRQ_UNINIT	(uint32_t)-2 /* in airq_temp_cpu till addspl called */
 
@@ -488,6 +487,8 @@ typedef struct {
 	uint32_t	avgi_cpu_id;	/* cpu of interrupt - from kernel */
 	dev_info_t	**avgi_dip_list; /* kmem_alloc'ed list of dev_infos. */
 					/* Contains num_devs elements. */
+	bool		avgi_user_bound; /* if cpu bound at admin request */
+					/* - from kernel */
 } apic_get_intr_t;
 
 /* Used by PSM_INTR_OP_GET_TYPE to return platform information. */
@@ -502,7 +503,8 @@ typedef struct {
 #define	PSMGI_REQ_NUM_DEVS	0x2	/* Request num of devices on vector */
 #define	PSMGI_REQ_VECTOR	0x4
 #define	PSMGI_REQ_GET_DEVS	0x8	/* Request device list */
-#define	PSMGI_REQ_ALL		0xf	/* Request everything */
+#define	PSMGI_REQ_USER_BOUND	0x10	/* Request user-bound state */
+#define	PSMGI_REQ_ALL		0x1f	/* Request everything */
 
 /* Other flags */
 #define	PSMGI_INTRBY_VEC	0	/* Vec passed.  xlate to IRQ needed */

@@ -1414,20 +1414,20 @@ apix_get_intr_info(ddi_intr_handle_impl_t *hdlp,
 
 	vecp = apix_get_req_vector(hdlp, intr_params_p->avgi_req_flags);
 	if (IS_VEC_FREE(vecp)) {
+		intr_params_p->avgi_user_bound = false;
 		intr_params_p->avgi_num_devs = 0;
 		intr_params_p->avgi_cpu_id = 0;
 		intr_params_p->avgi_req_flags = 0;
 		return (PSM_SUCCESS);
 	}
 
-	if (intr_params_p->avgi_req_flags & PSMGI_REQ_CPUID) {
+	if (intr_params_p->avgi_req_flags & PSMGI_REQ_CPUID)
 		intr_params_p->avgi_cpu_id = vecp->v_cpuid;
 
+	if (intr_params_p->avgi_req_flags & PSMGI_REQ_USER_BOUND) {
 		/* Return user bound info for intrd. */
-		if (intr_params_p->avgi_cpu_id & IRQ_USER_BOUND) {
-			intr_params_p->avgi_cpu_id &= ~IRQ_USER_BOUND;
-			intr_params_p->avgi_cpu_id |= PSMGI_CPU_USER_BOUND;
-		}
+		intr_params_p->avgi_user_bound =
+		    (vecp->v_flags & APIX_VEC_F_USER_BOUND) != 0;
 	}
 
 	if (intr_params_p->avgi_req_flags & PSMGI_REQ_VECTOR)

@@ -20,6 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright 2026 Oxide Computer Company
  */
 /*
  *	Kstat support for X86 PCI driver
@@ -104,13 +105,14 @@ pci_ih_ks_update(kstat_t *ksp, int rw)
 	bcopy(ih_p, &tmp_hdl, sizeof (ddi_intr_handle_impl_t));
 	tmp_hdl.ih_private = (void *)&intrinfo;
 	intrinfo.avgi_cpu_id = 0; /* In case psm_intr_ops fails */
-	intrinfo.avgi_req_flags = PSMGI_REQ_CPUID | PSMGI_REQ_VECTOR;
+	intrinfo.avgi_user_bound = false;
+	intrinfo.avgi_req_flags = PSMGI_REQ_CPUID | PSMGI_REQ_VECTOR |
+	    PSMGI_REQ_USER_BOUND;
 	intrinfo.avgi_req_flags |= PSMGI_INTRBY_DEFAULT;
 
 	if ((ih_p->ih_state != DDI_IHDL_STATE_ENABLE) ||
 	    ((*psm_intr_ops)(NULL, &tmp_hdl, PSM_INTR_OP_GET_INTR, NULL) !=
-	    DDI_SUCCESS) ||
-	    (intrinfo.avgi_cpu_id & PSMGI_CPU_FLAGS)) {
+	    DDI_SUCCESS) || intrinfo.avgi_user_bound) {
 
 		(void) strcpy(pci_ks_template.ihks_type.value.c, "disabled");
 		pci_ks_template.ihks_pil.value.ui64 = 0;
@@ -120,7 +122,7 @@ pci_ih_ks_update(kstat_t *ksp, int rw)
 		pci_ks_template.ihks_ino.value.ui64 = 0;
 
 		/* Interrupt is user-bound.  Remove kstat. */
-		if (intrinfo.avgi_cpu_id & PSMGI_CPU_FLAGS)
+		if (intrinfo.avgi_user_bound)
 			(void) taskq_dispatch(system_taskq,
 			    (void (*)(void *))pci_kstat_delete, ksp, TQ_SLEEP);
 

@@ -218,12 +218,6 @@ struct psm_info {
 #define	PSM_INTR_POKE		0x03
 
 /*
- *	Get INTR flags
- */
-#define	PSMGI_CPU_USER_BOUND	0x80000000 /* user requested bind if set */
-#define	PSMGI_CPU_FLAGS		0x80000000 /* all possible flags */
-
-/*
  *	return code
  */
 #define	PSM_SUCCESS		DDI_SUCCESS

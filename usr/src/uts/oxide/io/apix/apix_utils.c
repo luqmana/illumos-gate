@@ -30,7 +30,7 @@
  * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
  * Copyright 2013 Pluribus Networks, Inc.
  * Copyright 2019 Joyent, Inc.
- * Copyright 2022 Oxide Computer Co.
+ * Copyright 2026 Oxide Computer Co.
  */
 
 #include <sys/processor.h>
@@ -186,9 +186,9 @@ apix_get_avail_vector_oncpu(uint32_t cpuid, int start, int end)
  * Return NULL on error
  */
 static apix_vector_t *
-apix_alloc_vector_oncpu(uint32_t cpuid, dev_info_t *dip, int inum, int type)
+apix_alloc_vector_oncpu(processorid_t tocpu, dev_info_t *dip, int inum,
+    int type, bool user_bound)
 {
-	processorid_t tocpu = cpuid & ~IRQ_USER_BOUND;
 	apix_vector_t *vecp;
 	int vector;
 
@@ -203,7 +203,7 @@ apix_alloc_vector_oncpu(uint32_t cpuid, dev_info_t *dip, int inum, int type)
 	vecp = apix_init_vector(tocpu, vector);
 	vecp->v_type = (ushort_t)type;
 	vecp->v_inum = inum;
-	vecp->v_flags = (cpuid & IRQ_USER_BOUND) ? APIX_VEC_F_USER_BOUND : 0;
+	vecp->v_flags = user_bound ? APIX_VEC_F_USER_BOUND : 0;
 
 	if (dip != NULL)
 		apix_set_dev_map(vecp, dip, inum);
@@ -219,12 +219,11 @@ apix_alloc_vector_oncpu(uint32_t cpuid, dev_info_t *dip, int inum, int type)
  * Return first vector number
  */
 apix_vector_t *
-apix_alloc_nvectors_oncpu(uint32_t cpuid, dev_info_t *dip, int inum,
-    int count, int type)
+apix_alloc_nvectors_oncpu(processorid_t tocpu, dev_info_t *dip, int inum,
+    int count, int type, bool user_bound)
 {
 	int i, msibits, start = 0, navail = 0;
 	apix_vector_t *vecp, *startp = NULL;
-	processorid_t tocpu = cpuid & ~IRQ_USER_BOUND;
 	uint_t flags;
 
 	ASSERT(APIX_CPU_LOCK_HELD(tocpu));
@@ -261,7 +260,7 @@ apix_alloc_nvectors_oncpu(uint32_t cpuid, dev_info_t *dip, int inum,
 	return (NULL);
 
 done:
-	flags = (cpuid & IRQ_USER_BOUND) ? APIX_VEC_F_USER_BOUND : 0;
+	flags = user_bound ? APIX_VEC_F_USER_BOUND : 0;
 
 	for (i = 0; i < count; i++) {
 		if ((vecp = apix_init_vector(tocpu, start + i)) == NULL)
@@ -1335,17 +1334,19 @@ apix_set_dev_binding(dev_info_t *dip, uint32_t cpu)
 /*
  * return the cpu to which this intr should be bound.
  * Check properties or any other mechanism to see if user wants it
- * bound to a specific CPU. If so, return the cpu id with high bit set.
+ * bound to a specific CPU. If so, *user_boundp is set to true.
  * If not, use the policy to choose a cpu and return the id.
  */
-uint32_t
-apix_bind_cpu(dev_info_t *dip)
+static processorid_t
+apix_bind_cpu(dev_info_t *dip, bool *user_boundp)
 {
 	int	instance, instno, prop_len, bind_cpu, count;
 	uint_t	i, rc;
 	major_t	major;
 	char	*name, *drv_name, *prop_val, *cptr;
 	char	prop_name[32];
+
+	*user_boundp = false;
 
 	lock_set(&apix_lock);
 
@@ -1415,13 +1416,13 @@ apix_bind_cpu(dev_info_t *dip)
 				i++;
 		bind_cpu = stoi(&cptr);
 		/* if specific cpu is bogus, then default to cpu 0 */
-		if (bind_cpu >= apic_nproc) {
+		if (!apic_cpu_in_range(bind_cpu)) {
 			cmn_err(CE_WARN, "apix: %s=%s: CPU %d not present",
 			    prop_name, prop_val, bind_cpu);
 			bind_cpu = 0;
 		} else {
 			/* indicate that we are bound at user request */
-			bind_cpu |= IRQ_USER_BOUND;
+			*user_boundp = true;
 		}
 		kmem_free(prop_val, prop_len);
 		/*
@@ -1434,13 +1435,16 @@ apix_bind_cpu(dev_info_t *dip)
 
 	lock_clear(&apix_lock);
 
-	return ((uint32_t)bind_cpu);
+	return (bind_cpu);
 }
 
 static boolean_t
 apix_is_cpu_enabled(processorid_t cpuid)
 {
 	apic_cpus_info_t *cpu_infop;
+
+	if (!apic_cpu_in_range(cpuid))
+		return (B_FALSE);
 
 	cpu_infop = &apic_cpus[cpuid];
 
@@ -1467,6 +1471,7 @@ apix_rebind(apix_vector_t *vecp, processorid_t newcpu, int count)
 	apix_vector_t *newp, *oldp;
 	processorid_t oldcpu = vecp->v_cpuid;
 	uchar_t newvec, oldvec = vecp->v_vector;
+	bool user_bound = (vecp->v_flags & APIX_VEC_F_USER_BOUND) != 0;
 	int i;
 
 	ASSERT(LOCK_HELD(&apix_lock) && count > 0);
@@ -1481,12 +1486,13 @@ apix_rebind(apix_vector_t *vecp, processorid_t newcpu, int count)
 	APIX_ENTER_CPU_LOCK(newcpu);
 
 	/* allocate vector */
-	if (count == 1)
-		newp = apix_alloc_vector_oncpu(newcpu, NULL, 0, vecp->v_type);
-	else {
+	if (count == 1) {
+		newp = apix_alloc_vector_oncpu(newcpu, NULL, 0, vecp->v_type,
+		    user_bound);
+	} else {
 		ASSERT(vecp->v_type == APIX_TYPE_MSI);
 		newp = apix_alloc_nvectors_oncpu(newcpu, NULL, 0, count,
-		    vecp->v_type);
+		    vecp->v_type, user_bound);
 	}
 	if (newp == NULL) {
 		APIX_LEAVE_CPU_LOCK(newcpu);
@@ -1597,17 +1603,17 @@ apix_alloc_intx(dev_info_t *dip, int inum, int irqno)
 	 * allocate vector
 	 */
 	if (irqp->airq_cpu == IRQ_UNINIT) {
-		uint32_t bindcpu, cpuid;
+		processorid_t cpuid;
+		bool user_bound;
 
 		/* select cpu by system policy */
-		bindcpu = apix_bind_cpu(dip);
-		cpuid = bindcpu & ~IRQ_USER_BOUND;
+		cpuid = apix_bind_cpu(dip, &user_bound);
 
 		/* allocate vector */
 		APIX_ENTER_CPU_LOCK(cpuid);
 
-		if ((vecp = apix_alloc_vector_oncpu(bindcpu, dip, inum,
-		    APIX_TYPE_FIXED)) == NULL) {
+		if ((vecp = apix_alloc_vector_oncpu(cpuid, dip, inum,
+		    APIX_TYPE_FIXED, user_bound)) == NULL) {
 			cmn_err(CE_WARN, "No interrupt vector for irq %x",
 			    irqno);
 			APIX_LEAVE_CPU_LOCK(cpuid);
@@ -1642,7 +1648,8 @@ apix_alloc_msi(dev_info_t *dip, int inum, int count, int behavior)
 {
 	int i, cap_ptr, rcount = count;
 	apix_vector_t *vecp;
-	processorid_t bindcpu, cpuid;
+	processorid_t cpuid;
+	bool user_bound;
 	ushort_t msi_ctrl;
 	ddi_acc_handle_t handle;
 
@@ -1664,8 +1671,7 @@ apix_alloc_msi(dev_info_t *dip, int inum, int count, int behavior)
 	msi_ctrl = pci_config_get16(handle, cap_ptr + PCI_MSI_CTRL);
 
 	/* bind to cpu */
-	bindcpu = apix_bind_cpu(dip);
-	cpuid = bindcpu & ~IRQ_USER_BOUND;
+	cpuid = apix_bind_cpu(dip, &user_bound);
 
 	/* if not ISP2, then round it down */
 	if (!ISP2(rcount))
@@ -1673,8 +1679,8 @@ apix_alloc_msi(dev_info_t *dip, int inum, int count, int behavior)
 
 	APIX_ENTER_CPU_LOCK(cpuid);
 	for (vecp = NULL; rcount > 0; rcount >>= 1) {
-		vecp = apix_alloc_nvectors_oncpu(bindcpu, dip, inum, rcount,
-		    APIX_TYPE_MSI);
+		vecp = apix_alloc_nvectors_oncpu(cpuid, dip, inum, rcount,
+		    APIX_TYPE_MSI, user_bound);
 		if (vecp != NULL || behavior == DDI_INTR_ALLOC_STRICT)
 			break;
 	}
@@ -1685,7 +1691,7 @@ apix_alloc_msi(dev_info_t *dip, int inum, int count, int behavior)
 	if (vecp == NULL) {
 		APIC_VERBOSE(INTR, (CE_CONT,
 		    "apix_alloc_msi: no %d cont vectors found on cpu 0x%x\n",
-		    count, bindcpu));
+		    count, cpuid));
 		return (0);
 	}
 
@@ -1703,22 +1709,22 @@ int
 apix_alloc_msix(dev_info_t *dip, int inum, int count, int behavior)
 {
 	apix_vector_t *vecp;
-	processorid_t bindcpu, cpuid;
+	processorid_t cpuid;
+	bool user_bound;
 	int i;
 
 	for (i = 0; i < count; i++) {
 		/* select cpu by system policy */
-		bindcpu = apix_bind_cpu(dip);
-		cpuid = bindcpu & ~IRQ_USER_BOUND;
+		cpuid = apix_bind_cpu(dip, &user_bound);
 
 		/* allocate vector */
 		APIX_ENTER_CPU_LOCK(cpuid);
-		if ((vecp = apix_alloc_vector_oncpu(bindcpu, dip, inum + i,
-		    APIX_TYPE_MSIX)) == NULL) {
+		if ((vecp = apix_alloc_vector_oncpu(cpuid, dip, inum + i,
+		    APIX_TYPE_MSIX, user_bound)) == NULL) {
 			APIX_LEAVE_CPU_LOCK(cpuid);
 			APIC_VERBOSE(INTR, (CE_CONT, "apix_alloc_msix: "
 			    "allocate msix for device dip=%p, inum=%d on"
-			    " cpu %d failed", (void *)dip, inum + i, bindcpu));
+			    " cpu %d failed", (void *)dip, inum + i, cpuid));
 			break;
 		}
 		vecp->v_flags |= APIX_VEC_F_MASKABLE;

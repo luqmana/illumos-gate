@@ -473,7 +473,6 @@ apic_probe_raw(const char *modname)
 bool
 apic_cpu_in_range(processorid_t cpu)
 {
-	cpu &= ~IRQ_USER_BOUND;
 	/* Check whether cpu id is in valid range. */
 	if (cpu < 0 || cpu >= apic_nproc) {
 		return (false);
