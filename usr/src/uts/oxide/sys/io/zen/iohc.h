@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef _SYS_IO_ZEN_IOHC_H
@@ -27,6 +27,47 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/*
+ * Indirect SMN access is performed via index/data register pairs of which there
+ * are 7 in the IOHC's config space (device 0, function 0).  The offsets and PPR
+ * assigned mapping are listed below.
+ */
+/*
+ * IOHC::NB_SMN_INDEX_0 / IOHC::NB_SMN_DATA_0: Software application
+ */
+#define	IOHC_NB_SMN_INDEX_0	0x60
+#define	IOHC_NB_SMN_DATA_0	0x64
+/*
+ * IOHC::NB_SMN_INDEX_1 / IOHC::NB_SMN_DATA_1: Reserved for OEM
+ */
+#define	IOHC_NB_SMN_INDEX_1	0xA0
+#define	IOHC_NB_SMN_DATA_1	0xA4
+/*
+ * IOHC::NB_SMN_INDEX_2 / IOHC::NB_SMN_DATA_2: BIOS (existing usage)
+ */
+#define	IOHC_NB_SMN_INDEX_2	0xB8
+#define	IOHC_NB_SMN_DATA_2	0xBC
+/*
+ * IOHC::NB_SMN_INDEX_3 / IOHC::NB_SMN_DATA_3: HSMP
+ */
+#define	IOHC_NB_SMN_INDEX_3	0xC4
+#define	IOHC_NB_SMN_DATA_3	0xC8
+/*
+ * IOHC::NB_SMN_INDEX_4 / IOHC::NB_SMN_DATA_4: MCA validation diagnostic tool
+ */
+#define	IOHC_NB_SMN_INDEX_4	0xD0
+#define	IOHC_NB_SMN_DATA_4	0xD4
+/*
+ * IOHC::NB_SMN_INDEX_5 / IOHC::NB_SMN_DATA_5: DFX, HDT, AVT
+ */
+#define	IOHC_NB_SMN_INDEX_5	0xE0
+#define	IOHC_NB_SMN_DATA_5	0xE4
+/*
+ * IOHC::NB_SMN_INDEX_6 / IOHC::NB_SMN_DATA_6: Reserved
+ */
+#define	IOHC_NB_SMN_INDEX_6	0xF8
+#define	IOHC_NB_SMN_DATA_6	0xFC
 
 /*
  * All individual register addresses within the IOHCDEV blocks must fit within

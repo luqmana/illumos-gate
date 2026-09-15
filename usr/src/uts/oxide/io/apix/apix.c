@@ -513,7 +513,7 @@ apix_picinit(void)
 	picsetup();	 /* initialise the 8259 */
 
 	/* add nmi handler - least priority nmi handler */
-	LOCK_INIT_CLEAR(&apic_nmi_lock);
+	mutex_init(&apic_nmi_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	if (!psm_add_nmintr(0, apic_nmi_intr,
 	    "apix NMI handler", (caddr_t)NULL))
@@ -2334,4 +2334,10 @@ int
 apix_loaded(void)
 {
 	return (1);
+}
+
+int
+apix_nmi_in_progress(void)
+{
+	return (mutex_owner(&apic_nmi_lock) == curthread);
 }

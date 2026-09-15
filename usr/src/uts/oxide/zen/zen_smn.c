@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -25,6 +25,7 @@
 #include <sys/mutex.h>
 #include <sys/pci_cfgspace.h>
 #include <sys/pci_impl.h>
+#include <sys/apic_common.h>
 
 #include <io/amdzen/amdzen.h>
 #include <sys/amdzen/smn.h>
@@ -142,11 +143,11 @@ zen_smn_mech1_read(const smn_reg_t reg)
 	ASSERT(SMN_REG_SIZE_IS_VALID(reg));
 
 	outl(PCI_CONFADD, PCI_CADDR1(0, AMDZEN_NB_SMN_DEVNO,
-	    AMDZEN_NB_SMN_FUNCNO, AMDZEN_NB_SMN_ADDR));
+	    AMDZEN_NB_SMN_FUNCNO, ZEN_NB_SMN_INDEX));
 	outl(PCI_CONFDATA, base_addr);
 
 	outl(PCI_CONFADD, PCI_CADDR1(0, AMDZEN_NB_SMN_DEVNO,
-	    AMDZEN_NB_SMN_FUNCNO, AMDZEN_NB_SMN_DATA + addr_off));
+	    AMDZEN_NB_SMN_FUNCNO, ZEN_NB_SMN_DATA + addr_off));
 	switch (SMN_REG_SIZE(reg)) {
 	case 1:
 		val = (uint32_t)inb(PCI_CONFDATA);
@@ -168,87 +169,110 @@ zen_smn_mech1_read(const smn_reg_t reg)
 	return (val);
 }
 
-uint32_t
-zen_smn_read(zen_iodie_t *iodie, const smn_reg_t reg)
+static uint32_t
+zen_smn_read_pair(zen_iodie_t *iodie, const smn_reg_t reg, uint32_t smn_idx,
+    uint32_t smn_data)
 {
-	const uint32_t addr = SMN_REG_ADDR(reg);
 	const uint32_t base_addr = SMN_REG_ADDR_BASE(reg);
-	const uint32_t addr_off = SMN_REG_ADDR_OFF(reg);
+	const uint32_t data_off = smn_data + SMN_REG_ADDR_OFF(reg);
 	uint32_t val;
 
-	ASSERT(SMN_REG_IS_NATURALLY_ALIGNED(reg));
-	ASSERT(SMN_REG_SIZE_IS_VALID(reg));
-	ASSERT(iodie != NULL);
-
-	mutex_enter(&iodie->zi_smn_lock);
 	pci_putl_func(iodie->zi_smn_busno, AMDZEN_NB_SMN_DEVNO,
-	    AMDZEN_NB_SMN_FUNCNO, AMDZEN_NB_SMN_ADDR, base_addr);
+	    AMDZEN_NB_SMN_FUNCNO, smn_idx, base_addr);
 	switch (SMN_REG_SIZE(reg)) {
 	case 1:
 		val = (uint32_t)pci_getb_func(iodie->zi_smn_busno,
-		    AMDZEN_NB_SMN_DEVNO, AMDZEN_NB_SMN_FUNCNO,
-		    AMDZEN_NB_SMN_DATA + addr_off);
+		    AMDZEN_NB_SMN_DEVNO, AMDZEN_NB_SMN_FUNCNO, data_off);
 		break;
 	case 2:
 		val = (uint32_t)pci_getw_func(iodie->zi_smn_busno,
-		    AMDZEN_NB_SMN_DEVNO, AMDZEN_NB_SMN_FUNCNO,
-		    AMDZEN_NB_SMN_DATA + addr_off);
+		    AMDZEN_NB_SMN_DEVNO, AMDZEN_NB_SMN_FUNCNO, data_off);
 		break;
 	case 4:
 		val = pci_getl_func(iodie->zi_smn_busno,
-		    AMDZEN_NB_SMN_DEVNO, AMDZEN_NB_SMN_FUNCNO,
-		    AMDZEN_NB_SMN_DATA);
+		    AMDZEN_NB_SMN_DEVNO, AMDZEN_NB_SMN_FUNCNO, data_off);
 		break;
 	default:
 		panic("unreachable invalid SMN register size %u",
 		    SMN_REG_SIZE(reg));
 	}
-	if (zen_smn_log != 0) {
-		cmn_err(CE_NOTE, "SMN R reg 0x%x: 0x%x", addr, val);
-	}
-	mutex_exit(&iodie->zi_smn_lock);
 
 	return (val);
+}
+
+uint32_t
+zen_smn_read(zen_iodie_t *iodie, const smn_reg_t reg)
+{
+	uint32_t val;
+
+	ASSERT(SMN_REG_IS_NATURALLY_ALIGNED(reg));
+	ASSERT(SMN_REG_SIZE_IS_VALID(reg));
+	ASSERT3P(iodie, !=, NULL);
+
+	if (apix_nmi_in_progress()) {
+		return (zen_smn_read_pair(iodie, reg, ZEN_NB_SMN_INDEX_NMI,
+		    ZEN_NB_SMN_DATA_NMI));
+	}
+
+	mutex_enter(&iodie->zi_smn_lock);
+	val = zen_smn_read_pair(iodie, reg, ZEN_NB_SMN_INDEX, ZEN_NB_SMN_DATA);
+	mutex_exit(&iodie->zi_smn_lock);
+
+	if (zen_smn_log != 0) {
+		cmn_err(CE_NOTE, "SMN R reg 0x%x: 0x%x", SMN_REG_ADDR(reg),
+		    val);
+	}
+
+	return (val);
+}
+
+static void
+zen_smn_write_pair(zen_iodie_t *iodie, const smn_reg_t reg, uint32_t smn_idx,
+    uint32_t smn_data, uint32_t val)
+{
+	const uint32_t base_addr = SMN_REG_ADDR_BASE(reg);
+	const uint32_t data_off = smn_data + SMN_REG_ADDR_OFF(reg);
+
+	pci_putl_func(iodie->zi_smn_busno, AMDZEN_NB_SMN_DEVNO,
+	    AMDZEN_NB_SMN_FUNCNO, smn_idx, base_addr);
+	switch (SMN_REG_SIZE(reg)) {
+	case 1:
+		pci_putb_func(iodie->zi_smn_busno, AMDZEN_NB_SMN_DEVNO,
+		    AMDZEN_NB_SMN_FUNCNO, data_off, (uint8_t)val);
+		break;
+	case 2:
+		pci_putw_func(iodie->zi_smn_busno, AMDZEN_NB_SMN_DEVNO,
+		    AMDZEN_NB_SMN_FUNCNO, data_off, (uint16_t)val);
+		break;
+	case 4:
+		pci_putl_func(iodie->zi_smn_busno, AMDZEN_NB_SMN_DEVNO,
+		    AMDZEN_NB_SMN_FUNCNO, data_off, val);
+		break;
+	default:
+		panic("unreachable invalid SMN register size %u",
+		    SMN_REG_SIZE(reg));
+	}
 }
 
 void
 zen_smn_write(zen_iodie_t *iodie, const smn_reg_t reg, const uint32_t val)
 {
-	const uint32_t addr = SMN_REG_ADDR(reg);
-	const uint32_t base_addr = SMN_REG_ADDR_BASE(reg);
-	const uint32_t addr_off = SMN_REG_ADDR_OFF(reg);
-
 	ASSERT(SMN_REG_IS_NATURALLY_ALIGNED(reg));
 	ASSERT(SMN_REG_SIZE_IS_VALID(reg));
 	ASSERT(SMN_REG_VALUE_FITS(reg, val));
-	ASSERT(iodie != NULL);
+	ASSERT3P(iodie, !=, NULL);
 
-	mutex_enter(&iodie->zi_smn_lock);
+	if (apix_nmi_in_progress()) {
+		zen_smn_write_pair(iodie, reg, ZEN_NB_SMN_INDEX_NMI,
+		    ZEN_NB_SMN_DATA_NMI, val);
+		return;
+	}
+
 	if (zen_smn_log != 0) {
-		cmn_err(CE_NOTE, "SMN W reg 0x%x: 0x%x", addr, val);
+		cmn_err(CE_NOTE, "SMN W reg 0x%x: 0x%x", SMN_REG_ADDR(reg),
+		    val);
 	}
-	pci_putl_func(iodie->zi_smn_busno, AMDZEN_NB_SMN_DEVNO,
-	    AMDZEN_NB_SMN_FUNCNO, AMDZEN_NB_SMN_ADDR, base_addr);
-	switch (SMN_REG_SIZE(reg)) {
-	case 1:
-		pci_putb_func(iodie->zi_smn_busno,
-		    AMDZEN_NB_SMN_DEVNO, AMDZEN_NB_SMN_FUNCNO,
-		    AMDZEN_NB_SMN_DATA + addr_off, (uint8_t)val);
-		break;
-	case 2:
-		pci_putw_func(iodie->zi_smn_busno,
-		    AMDZEN_NB_SMN_DEVNO, AMDZEN_NB_SMN_FUNCNO,
-		    AMDZEN_NB_SMN_DATA + addr_off, (uint16_t)val);
-		break;
-	case 4:
-		pci_putl_func(iodie->zi_smn_busno,
-		    AMDZEN_NB_SMN_DEVNO, AMDZEN_NB_SMN_FUNCNO,
-		    AMDZEN_NB_SMN_DATA, val);
-		break;
-	default:
-		panic("unreachable invalid SMN register size %u",
-		    SMN_REG_SIZE(reg));
-	}
-
+	mutex_enter(&iodie->zi_smn_lock);
+	zen_smn_write_pair(iodie, reg, ZEN_NB_SMN_INDEX, ZEN_NB_SMN_DATA, val);
 	mutex_exit(&iodie->zi_smn_lock);
 }

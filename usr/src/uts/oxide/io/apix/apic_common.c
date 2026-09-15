@@ -190,7 +190,7 @@ int		apic_num_cksum_errors = 0;
 int	apic_error = 0;
 
 /* use to make sure only one cpu handles the nmi */
-lock_t	apic_nmi_lock;
+kmutex_t	apic_nmi_lock;
 /* use to make sure only one cpu handles the error interrupt */
 lock_t	apic_error_lock;
 
@@ -1340,7 +1340,7 @@ apic_nmi_intr(caddr_t arg __unused, caddr_t arg1 __unused)
 
 	apic_error |= APIC_ERR_NMI;
 
-	if (!lock_try(&apic_nmi_lock))
+	if (!mutex_tryenter(&apic_nmi_lock))
 		return (DDI_INTR_CLAIMED);
 	apic_num_nmis++;
 
@@ -1399,7 +1399,7 @@ apic_nmi_intr(caddr_t arg __unused, caddr_t arg1 __unused)
 	 */
 	zen_fabric_nmi_eoi();
 
-	lock_clear(&apic_nmi_lock);
+	mutex_exit(&apic_nmi_lock);
 	return (DDI_INTR_CLAIMED);
 }
 
