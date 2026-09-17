@@ -22,6 +22,7 @@
  * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  * Copyright 2018 Joyent, Inc.
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -297,11 +298,8 @@ kaif_main_loop(kaif_cpusave_t *cpusave)
 		 * Don't stop the world, as there's nothing to clean up that
 		 * can't be handled by the running kernel.
 		 */
-		if (!kmdb_dpi_resume_requested &&
-		    kmdb_kdi_get_unload_request()) {
-			cpusave->krs_cpu_state = KAIF_CPU_STATE_NONE;
+		if (!kmdb_dpi_resume_requested && kmdb_kdi_get_unload_request())
 			return (KAIF_CPU_CMD_RESUME);
-		}
 
 		/*
 		 * We're a slave with no master, so just resume.  This can
@@ -315,10 +313,8 @@ kaif_main_loop(kaif_cpusave_t *cpusave)
 		 * and enables interrupts.  We'll then come back in via
 		 * kdi_slave_entry() and hit this path.
 		 */
-		if (cpusave->krs_cpu_state == KAIF_CPU_STATE_SLAVE) {
-			cpusave->krs_cpu_state = KAIF_CPU_STATE_NONE;
+		if (cpusave->krs_cpu_state == KAIF_CPU_STATE_SLAVE)
 			return (KAIF_CPU_CMD_RESUME);
-		}
 
 		kaif_select_master(cpusave);
 
@@ -358,8 +354,6 @@ kaif_main_loop(kaif_cpusave_t *cpusave)
 	kaif_lock_enter(&kaif_loop_lock);
 	kaif_looping--;
 	kaif_lock_exit(&kaif_loop_lock);
-
-	cpusave->krs_cpu_state = KAIF_CPU_STATE_NONE;
 
 	if (cmd == KAIF_CPU_CMD_RESUME) {
 		/*

@@ -230,12 +230,6 @@
 	movq	KRS_CURCRUMB(cpusave), tmp;	\
 	movq	value, offset(tmp)
 
-	/* XXX implement me */
-	ENTRY_NP(kdi_nmiint)
-	clrq	%rcx
-	movq	(%rcx), %rcx
-	SET_SIZE(kdi_nmiint)
-
 	/*
 	 * The main entry point for master CPUs.  It also serves as the trap
 	 * handler for all traps and interrupts taken during single-step.
@@ -309,6 +303,11 @@
 #endif	/* __xpv */
 
 	GET_CPUSAVE_ADDR	/* %rax = cpusave, %rbx = CPU ID */
+
+	/*
+	 * kaif_main_loop will set this to MASTER or SLAVE as appropriate.
+	 */
+	movq	$KDI_CPU_STATE_ENTERING, KRS_CPU_STATE(%rax)
 
 	ADVANCE_CRUMB_POINTER(%rax, %rcx, %rdx)
 
@@ -539,6 +538,8 @@
 
 	movq	KRS_GREGS(%rdi), %rsp
 
+	movq	$KDI_CPU_STATE_NONE, KRS_CPU_STATE(%rdi)
+
 #if !defined(__xpv)
 	/*
 	 * If we're going back via tr_iret_kdi, then we want to copy the
@@ -615,8 +616,8 @@
 	ENTRY_NP(kdi_pass_to_kernel)
 
 	popq	%rdi /* cpusave */
-	movq	$KDI_CPU_STATE_NONE, KRS_CPU_STATE(%rdi)
 	movq	KRS_GREGS(%rdi), %rsp
+	movq	$KDI_CPU_STATE_NONE, KRS_CPU_STATE(%rdi)
 
 	cmpq	$2, %rax
 	jne	no_restore_cr3

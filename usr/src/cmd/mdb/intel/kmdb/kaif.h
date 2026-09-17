@@ -21,6 +21,8 @@
 /*
  * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ *
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef _KAIF_H
@@ -42,6 +44,7 @@ typedef kdi_cpusave_t kaif_cpusave_t;
 #define	KAIF_CPU_STATE_NONE		KDI_CPU_STATE_NONE
 #define	KAIF_CPU_STATE_MASTER		KDI_CPU_STATE_MASTER
 #define	KAIF_CPU_STATE_SLAVE		KDI_CPU_STATE_SLAVE
+#define	KAIF_CPU_STATE_ENTERING		KDI_CPU_STATE_ENTERING
 
 #ifndef _ASM
 

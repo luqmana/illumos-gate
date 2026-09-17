@@ -23,6 +23,7 @@
  * Use is subject to license terms.
  *
  * Copyright 2018 Joyent, Inc.
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -110,7 +111,7 @@ int		kdi_nmemranges;
 
 typedef void idt_hdlr_f(void);
 
-extern idt_hdlr_f kdi_trap0, kdi_trap1, kdi_int2, kdi_trap3, kdi_trap4;
+extern idt_hdlr_f kdi_trap0, kdi_trap1, kdi_trap3, kdi_trap4;
 extern idt_hdlr_f kdi_trap5, kdi_trap6, kdi_trap7, kdi_trap9;
 extern idt_hdlr_f kdi_traperr10, kdi_traperr11, kdi_traperr12;
 extern idt_hdlr_f kdi_traperr13, kdi_traperr14, kdi_trap16, kdi_traperr17;
@@ -144,7 +145,7 @@ struct idt_description {
 } idt_description[] = {
 	{ T_ZERODIV, 0,		kdi_trap0, NULL },
 	{ T_SGLSTP, 0,		kdi_trap1, NULL },
-	{ T_NMIFLT, 0,		kdi_int2, NULL },
+	{ T_NMIFLT, 0,		nmiint, NULL },
 	{ T_BPTFLT, 0,		kdi_trap3, NULL },
 	{ T_OVFLW, 0,		kdi_trap4, NULL },
 	{ T_BOUNDFLT, 0,	kdi_trap5, NULL },
@@ -179,17 +180,25 @@ kdi_idt_init(selector_t sel)
 	for (id = idt_description; id->id_basehdlr != NULL; id++) {
 		uint_t high = id->id_high != 0 ? id->id_high : id->id_low;
 		size_t incr = id->id_incrp != NULL ? *id->id_incrp : 0;
+		uint_t ist = IST_DBG;
 
 #if !defined(__xpv)
-		if (kpti_enable && sel == KCS_SEL && id->id_low == T_DBLFLT)
-			id->id_basehdlr = tr_syserrtrap;
+		if (id->id_low == T_NMIFLT)
+			ist = IST_NMI;
+
+		if (kpti_enable && sel == KCS_SEL) {
+			if (id->id_low == T_DBLFLT)
+				id->id_basehdlr = tr_syserrtrap;
+			else if (id->id_low == T_NMIFLT)
+				id->id_basehdlr = tr_nmiint;
+		}
 #endif
 
 		for (i = id->id_low; i <= high; i++) {
 			caddr_t hdlr = (caddr_t)id->id_basehdlr +
 			    incr * (i - id->id_low);
 			set_gatesegd(&kdi_idt[i], (void (*)())hdlr, sel,
-			    SDT_SYSIGT, TRP_KPL, IST_DBG);
+			    SDT_SYSIGT, TRP_KPL, ist);
 		}
 	}
 }
@@ -420,4 +429,13 @@ kdi_debugger_entry(kdi_cpusave_t *cpusave)
 		cpusave->krs_gregs[KDIREG_PC]--;
 
 	kdi_kmdb_main(cpusave);
+}
+
+bool
+kdi_cpu_in_debugger(void)
+{
+	if (kdi_cpusave == NULL || CPU->cpu_id >= kdi_ncpusave)
+		return (false);
+
+	return (kdi_cpusave[CPU->cpu_id].krs_cpu_state != KDI_CPU_STATE_NONE);
 }

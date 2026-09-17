@@ -76,6 +76,7 @@
 #include <sys/apic_timer.h>
 #include <sys/tsc.h>
 #include <sys/smm.h>
+#include <sys/kdi.h>
 #include <sys/amdzen/smn.h>
 #include <sys/amdzen/fch.h>
 #include <sys/io/fch/pmio.h>
@@ -1360,6 +1361,12 @@ apic_nmi_intr(caddr_t arg __unused, caddr_t arg1 __unused)
 
 	if (action == NMI_ACTION_KMDB && !psm_debugger())
 		action = NMI_ACTION_PANIC;
+
+	/*
+	 * Don't need to enter kmdb if we're already there.
+	 */
+	if (action == NMI_ACTION_KMDB && kdi_cpu_in_debugger())
+		action = NMI_ACTION_IGNORE;
 
 	/*
 	 * We never ignore SMIs.

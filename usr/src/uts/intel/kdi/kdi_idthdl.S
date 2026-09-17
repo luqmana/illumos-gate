@@ -24,6 +24,7 @@
  *
  * Copyright 2018 Joyent, Inc.
  * Copyright 2020 OmniOS Community Edition (OmniOSce) Association.
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -158,17 +159,6 @@
 	SET_SIZE(kdi_traperr##n)
 
 #if !defined(__xpv)
-#define	MKNMIHDLR \
-	ENTRY_NP(kdi_int2);		\
-	push	$0;			\
-	push	$2;			\
-	pushq	%r13;			\
-	mov	kpti_safe_cr3, %r13;	\
-	mov	%r13, %cr3;		\
-	popq	%r13;			\
-	jmp	kdi_nmiint;		\
-	SET_SIZE(kdi_int2)
-
 #define	MKMCEHDLR \
 	ENTRY_NP(kdi_trap18);		\
 	push	$0;			\
@@ -180,13 +170,6 @@
 	jmp	kdi_cmnint;		\
 	SET_SIZE(kdi_trap18)
 #else
-#define	MKNMIHDLR \
-	ENTRY_NP(kdi_int2);		\
-	push	$0;			\
-	push	$2;			\
-	jmp	kdi_nmiint;		\
-	SET_SIZE(kdi_int2)
-
 #define	MKMCEHDLR \
 	ENTRY_NP(kdi_trap18);		\
 	push	$0;			\
@@ -230,7 +213,6 @@ kdi_isr_start:
 	MKINVALHDLR
 	MKTRAPHDLR(0)
 	MKTRAPHDLR(1)
-	MKNMIHDLR/*2*/
 	MKTRAPHDLR(3)
 	MKTRAPHDLR(4)
 	MKTRAPHDLR(5)

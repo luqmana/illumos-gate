@@ -23,6 +23,7 @@
  * Use is subject to license terms.
  *
  * Copyright 2018 Joyent, Inc.
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef _SYS_KDI_REGS_H
@@ -50,6 +51,7 @@ extern "C" {
 #define	KDI_CPU_STATE_NONE		0
 #define	KDI_CPU_STATE_MASTER		1
 #define	KDI_CPU_STATE_SLAVE		2
+#define	KDI_CPU_STATE_ENTERING		3
 
 #define	KDIREG_DRCTL_WPALLEN_MASK	0x000000ff
 #define	KDIREG_DRSTAT_RESERVED		0xffff0ff0

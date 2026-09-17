@@ -26,6 +26,7 @@
  * Copyright 2021 Joyent, Inc.
  * Copyright (c) 2016, 2017 by Delphix. All rights reserved.
  * Copyright 2019 Joshua M. Clulow <josh@sysmgr.org>
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -74,6 +75,7 @@
 #include <sys/x_call.h>
 #include <sys/reboot.h>
 #include <sys/hpet.h>
+#include <sys/kdi.h>
 #include <sys/apic_common.h>
 #include <sys/apic_timer.h>
 #include <sys/tsc.h>
@@ -852,6 +854,12 @@ apic_nmi_intr(caddr_t arg __unused, caddr_t arg1 __unused)
 		else
 			action = NMI_ACTION_IGNORE;
 	}
+
+	/*
+	 * Don't need to enter kmdb if we're already there.
+	 */
+	if (action == NMI_ACTION_KMDB && kdi_cpu_in_debugger())
+		action = NMI_ACTION_IGNORE;
 
 	switch (action) {
 	case NMI_ACTION_IGNORE:

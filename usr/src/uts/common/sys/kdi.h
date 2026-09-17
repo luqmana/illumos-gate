@@ -21,12 +21,15 @@
 /*
  * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ *
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef _KDI_H
 #define	_KDI_H
 
 #include <sys/types.h>
+#include <sys/stdbool.h>
 
 /*
  * The Kernel/Debugger interface.
@@ -95,6 +98,11 @@ typedef enum {
 } kdi_dtrace_state_t;
 
 extern int kdi_dtrace_set(kdi_dtrace_set_t);
+
+/*
+ * Returns true if the current CPU is stopped in the debugger.
+ */
+extern bool kdi_cpu_in_debugger(void);
 
 #ifdef __cplusplus
 }
