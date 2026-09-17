@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -21,12 +21,16 @@
 #include <sys/types.h>
 #include <sys/stdbool.h>
 #include <sys/cyclic.h>
+#include <sys/cpu.h>
+#include <sys/time.h>
 
 #include <sys/amdzen/fch/iomux.h>
 #include <sys/amdzen/fch/gpio.h>
 #include <sys/amdzen/mmioreg.h>
 #include <sys/io/fch/pmio.h>
+#include <sys/io/zen/fabric.h>
 #include <sys/io/zen/hacks.h>
+#include <sys/io/zen/smn.h>
 #include <sys/io/zen/uarch.h>
 #include <sys/io/zen/platform.h>
 #include <sys/io/zen/platform_impl.h>
@@ -408,4 +412,65 @@ zen_gpio_watchdog(void)
 	(void) cyclic_add(&hdlr, &when);
 	mutex_exit(&cpu_lock);
 
+}
+
+/*
+ * FCH GPIO 86 is the NMI_SYNCFLOOD_L pin on all processors we support.
+ */
+#define	ZEN_FCH_GPIO_NMI_SYNCFLOOD	86
+/*
+ * Upper-bound on how long we'll wait for an external NMI pin to release.
+ */
+#define	ZEN_NMI_PIN_RELEASE_TIMEOUT	(50 * (NANOSEC / MILLISEC))
+/*
+ * Counter indicating how many times we tried unsuccessfully waiting for an
+ * asserted NMI's pin to be released.
+ */
+static uint_t zen_nmi_pin_release_timeouts;
+
+/*
+ * The amount of time required for a pulse on the NMI pin is not documented.
+ * If NMI_SYNCFLOOD_L is still held low by the time we EOI, the IOHC will
+ * immediately re-arm and deliver another NMI.  If our handler exits quickly,
+ * e.g. because nmi_action=IGNORE or we're already in the debugger, this can
+ * cause a burst of NMIs as we race the SP's pulse duration.  These subsequent
+ * NMIs from the same assertion are not particularly useful so this attempts
+ * to poll until the pin has been released.
+ *
+ * Note this runs from the NMI handler so no allocations, locks or otherwise
+ * blocking routines.
+ */
+void
+zen_wait_for_nmi_release(zen_ioms_t *ioms)
+{
+	const smn_reg_t nmi_gpio_reg =
+	    FCH_GPIO_GPIO_SMN(ZEN_FCH_GPIO_NMI_SYNCFLOOD);
+	hrtime_t start;
+
+	start = gethrtime_waitfree();
+	for (;;) {
+		/*
+		 * Note the zen_* SMN routines recognize when we're in an NMI
+		 * context and will use a separate SMN index/data pair.
+		 */
+		const uint32_t v = zen_ioms_read(ioms, nmi_gpio_reg);
+
+		/*
+		 * NMI_SYNCFLOOD_L is active low so if it's high that means
+		 * it's been released.
+		 */
+		if (FCH_GPIO_GPIO_GET_INPUT(v) == FCH_GPIO_GPIO_INPUT_HIGH)
+			return;
+
+		/*
+		 * We don't want to wait indefinitely so give up after some
+		 * time if the pin is still active.
+		 */
+		if (gethrtime_waitfree() - start > ZEN_NMI_PIN_RELEASE_TIMEOUT)
+			break;
+
+		SMT_PAUSE();
+	}
+
+	zen_nmi_pin_release_timeouts++;
 }

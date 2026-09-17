@@ -3394,20 +3394,20 @@ zen_fabric_init_post_mpstartup(void)
 	zen_gpio_watchdog();
 }
 
-static int
-zen_fabric_nmi_cb(zen_ioms_t *ioms, void *arg)
-{
-	void (*uarch_nmi_func)(zen_ioms_t *) = arg;
-	uarch_nmi_func(ioms);
-	return (0);
-}
-
 void
 zen_fabric_debug_signal(void)
 {
 	const zen_fabric_ops_t *fops = oxide_zen_fabric_ops();
 	if (fops->zfo_pcie_dbg_signal != NULL)
 		fops->zfo_pcie_dbg_signal();
+}
+
+static int
+zen_fabric_enable_nmi_cb(zen_ioms_t *ioms, void *arg)
+{
+	void (*uarch_nmi_func)(zen_ioms_t *) = arg;
+	uarch_nmi_func(ioms);
+	return (0);
 }
 
 /*
@@ -3418,8 +3418,20 @@ zen_fabric_enable_nmi(void)
 {
 	const zen_fabric_ops_t *fabric_ops = oxide_zen_fabric_ops();
 	VERIFY3P(fabric_ops->zfo_iohc_enable_nmi, !=, NULL);
-	(void) zen_walk_ioms(zen_fabric_nmi_cb,
+	(void) zen_walk_ioms(zen_fabric_enable_nmi_cb,
 	    fabric_ops->zfo_iohc_enable_nmi);
+}
+
+static int
+zen_fabric_nmi_eoi_cb(zen_ioms_t *ioms, void *arg)
+{
+	void (*uarch_nmi_func)(zen_ioms_t *) = arg;
+
+	if ((zen_ioms_flags(ioms) & ZEN_IOMS_F_HAS_FCH) != 0)
+		zen_wait_for_nmi_release(ioms);
+
+	uarch_nmi_func(ioms);
+	return (0);
 }
 
 /*
@@ -3432,7 +3444,8 @@ zen_fabric_nmi_eoi(void)
 {
 	const zen_fabric_ops_t *fabric_ops = oxide_zen_fabric_ops();
 	VERIFY3P(fabric_ops->zfo_iohc_nmi_eoi, !=, NULL);
-	(void) zen_walk_ioms(zen_fabric_nmi_cb, fabric_ops->zfo_iohc_nmi_eoi);
+	(void) zen_walk_ioms(zen_fabric_nmi_eoi_cb,
+	    fabric_ops->zfo_iohc_nmi_eoi);
 }
 
 /*

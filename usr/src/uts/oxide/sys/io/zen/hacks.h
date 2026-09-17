@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef	_SYS_IO_ZEN_HACKS_H
@@ -84,6 +84,8 @@ extern void zen_fabric_hack_bridges(zen_fabric_t *);
 extern void zen_apob_emcr_save(void);
 
 extern void zen_gpio_watchdog(void);
+
+extern void zen_wait_for_nmi_release(zen_ioms_t *);
 
 #ifdef	__cplusplus
 }
