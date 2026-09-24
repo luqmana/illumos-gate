@@ -9,7 +9,7 @@
 .\" http://www.illumos.org/license/CDDL.
 .\"
 .\"
-.\" Copyright 2022 Oxide Computer Company
+.\" Copyright 2026 Oxide Computer Company
 .\"
 .Dd April 12, 2022
 .Dt BITDEL64 9F
@@ -77,5 +77,6 @@ Upon successful completion, the
 .Fn bitdel64
 returns the modified integer with the appropriate bits removed.
 .Sh SEE ALSO
+.Xr bitins64 9F ,
 .Xr bitset64 9F ,
 .Xr bitx64 9F

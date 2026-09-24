@@ -1131,9 +1131,83 @@
  * removed bits didn't exist.
  *
  *
- * That's most of the normalization process for the time being. We will have to
- * revisit this when we have to transform a normal address into a system address
- * and undo all this.
+ * That's most of the normalization process. Next comes how to undo all of this.
+ *
+ * ---------------------------------
+ * Channel Address Denormalization
+ * ---------------------------------
+ *
+ * MCA/MCA-X errors from the UMC report the address that they encountered as a
+ * channel-normalized address, so to do anything useful with such an error we
+ * need to be able to go the other way: from a channel and its normalized
+ * address back to a system physical address. Conceptually we just run the
+ * forward process in reverse:
+ *
+ *   1. Determine which of the UMC's DRAM rules the normalized address belongs
+ *      to. The DRAM offsets that were added during normalization tell us where
+ *      each rule's normalized addresses start, so we pick the rule with the
+ *      largest enabled offset at or below the address and subtract it. Rules
+ *      beyond the first whose offset is disabled are not part of the channel's
+ *      normalized address space and are ignored. This leaves us with an
+ *      address relative to the rule's base.
+ *
+ *   2. Find the corresponding CCM DRAM rule. The forward path always uses the
+ *      CCM's copy of a rule for its interleave and remap settings and only
+ *      uses the UMC's copy for the offset. We match them up by their base and
+ *      limit so that the same rule drives both directions.
+ *
+ *   3. Work out the socket, die, and channel interleave values that must have
+ *      been produced. Starting from the channel's fabric ID, we undo any CS
+ *      remapping by searching the remap table for the entry that produced our
+ *      component, then subtract the rule's destination fabric ID and decompose
+ *      the result. If the values are out of range for the rule (e.g. the
+ *      channel ID is beyond the number of channels being interleaved across)
+ *      then this channel simply isn't a target of the rule.
+ *
+ *   4. Re-insert the bits that normalization removed. How we do this depends on
+ *      the interleave mode but fundamentally can be categorized into three
+ *      kinds of bits:
+ *
+ *      o Bits that were used directly as an interleave value (the non-hashed
+ *        modes). This is the simplest case as these bits are simply the
+ *        interleave values from (3).
+ *
+ *      o Bits that were XOR'd with other address bits to form a hash. These
+ *        bits are part of a system of equations we can solve using the target
+ *        hash values and retained address bits. The hash values themselves
+ *        come from the interleave values from (3).
+ *
+ *      o Bits that were folded into a modulus for the non-power of 2 modes.
+ *        Here the normalized address contains the quotient of the upper
+ *        address and the modulus, and the channel contains the remainder. We
+ *        rebuild the upper address as quotient * modulus + remainder.
+ *
+ *      But as with the forward path described above, things are never that
+ *      simple and so we have 2 special cases:
+ *
+ *      o For the Zen 3 6-channel hash, the normalized address' top two bits
+ *        are forced to 0b11 when hash[2:1] == 3 and the original value of those
+ *        bits are folded into the channel via a modulus 3 of the upper address
+ *        (see ZEN 3 6-CHANNEL above for more details and worked examples).
+ *        Thankfully for us, a normal address in this mode can never have those
+ *        bits set letting us distinguish this case: channel 6/7 don't exist and
+ *        so channel ID can never be 0b110/0b111, i.e., both upper bits can't
+ *        be set except but in this case.
+ *
+ *      o For the DF 4D2 NPS 1K/2K non-power of 2 hashes, the channel modulus
+ *        is computed over the raw system address while the division is computed
+ *        over the rule relative address. To solve that, we generate a set of
+ *        candidates for each possible remainder and disambiguate at (6).
+ *
+ *   5. Add back the rule's base address and, if hoisting is active for the
+ *      rule, the size of the DRAM hole. An address that would land at or above
+ *      the start of the hole must have come from above 4 GiB.
+ *
+ *   6. Run the resulting system address through the normal forward decoder and
+ *      check that it arrives back at the same channel and normalized address.
+ *      This catches any mistakes on our part, picks between candidates from
+ *      (4), and conveniently leaves us with the full DIMM-level decoding of the
+ *      address.
  *
  * -------------------------------------
  * Selecting a DIMM and UMC Organization
@@ -1325,9 +1399,6 @@
  * still some stops on the journey for this driver. In particular, here are the
  * major open areas that could be implemented to extend what this can do:
  *
- *   o The ability to transform a normalized channel address back to a system
- *     address. This is required for MCA/MCA-X error handling as those generally
- *     work in terms of channel addresses.
  *   o Integrating with the MCA/MCA-X error handling paths so that way we can
  *     take correct action in the face of ECC errors and allowing recovery from
  *     uncorrectable errors.
@@ -3690,11 +3761,48 @@ zen_umc_open(dev_t *devp, int flag, int otyp, cred_t *credp)
 	return (0);
 }
 
+/*
+ * Fill in the ioctl structure from a successful decode, whichever direction it
+ * was performed in.
+ */
 static void
-zen_umc_ioctl_decode(zen_umc_t *umc, mc_encode_ioc_t *encode)
+zen_umc_ioctl_fill_decode(zen_umc_t *umc, const zen_umc_decoder_t *dec,
+    mc_encode_ioc_t *encode)
+{
+	uint32_t sock, die, comp;
+
+	encode->mcei_errdata = 0;
+	encode->mcei_err = 0;
+	encode->mcei_pa = dec->dec_pa;
+	encode->mcei_chan_addr = dec->dec_norm_addr;
+	encode->mcei_rank_addr = UINT64_MAX;
+	encode->mcei_board = 0;
+	zen_fabric_id_decompose(&umc->umc_decomp, dec->dec_targ_fabid, &sock,
+	    &die, &comp);
+	encode->mcei_chip = sock;
+	encode->mcei_die = die;
+	encode->mcei_mc = dec->dec_umc_chan->chan_logid;
+	encode->mcei_chan = 0;
+	encode->mcei_dimm = dec->dec_dimm_no;
+	encode->mcei_row = dec->dec_dimm_row;
+	encode->mcei_column = dec->dec_dimm_col;
+	/*
+	 * We don't have a logical rank that something matches to, we have the
+	 * actual chip-select and rank multiplication. If we could figure out
+	 * how to transform that into an actual rank, that'd be grand.
+	 */
+	encode->mcei_rank = UINT8_MAX;
+	encode->mcei_cs = dec->dec_dimm_csno;
+	encode->mcei_rm = dec->dec_dimm_rm;
+	encode->mcei_bank = dec->dec_dimm_bank;
+	encode->mcei_bank_group = dec->dec_dimm_bank_group;
+	encode->mcei_subchan = dec->dec_dimm_subchan;
+}
+
+static void
+zen_umc_ioctl_decode_phys_addr(zen_umc_t *umc, mc_encode_ioc_t *encode)
 {
 	zen_umc_decoder_t dec;
-	uint32_t sock, die, comp;
 
 	bzero(&dec, sizeof (dec));
 	if (!zen_umc_decode_pa(umc, encode->mcei_pa, &dec)) {
@@ -3703,31 +3811,40 @@ zen_umc_ioctl_decode(zen_umc_t *umc, mc_encode_ioc_t *encode)
 		return;
 	}
 
-	encode->mcei_errdata = 0;
-	encode->mcei_err = 0;
-	encode->mcei_chan_addr = dec.dec_norm_addr;
-	encode->mcei_rank_addr = UINT64_MAX;
-	encode->mcei_board = 0;
-	zen_fabric_id_decompose(&umc->umc_decomp, dec.dec_targ_fabid, &sock,
-	    &die, &comp);
-	encode->mcei_chip = sock;
-	encode->mcei_die = die;
-	encode->mcei_mc = dec.dec_umc_chan->chan_logid;
-	encode->mcei_chan = 0;
-	encode->mcei_dimm = dec.dec_dimm_no;
-	encode->mcei_row = dec.dec_dimm_row;
-	encode->mcei_column = dec.dec_dimm_col;
-	/*
-	 * We don't have a logical rank that something matches to, we have the
-	 * actual chip-select and rank multiplication. If we could figure out
-	 * how to transform that into an actual rank, that'd be grand.
-	 */
-	encode->mcei_rank = UINT8_MAX;
-	encode->mcei_cs = dec.dec_dimm_csno;
-	encode->mcei_rm = dec.dec_dimm_rm;
-	encode->mcei_bank = dec.dec_dimm_bank;
-	encode->mcei_bank_group = dec.dec_dimm_bank_group;
-	encode->mcei_subchan = dec.dec_dimm_subchan;
+	zen_umc_ioctl_fill_decode(umc, &dec, encode);
+}
+
+static void
+zen_umc_ioctl_decode_chan_addr(zen_umc_t *umc, mc_encode_ioc_t *encode)
+{
+	zen_umc_decoder_t dec;
+	const zen_umc_chan_t *chan;
+
+	encode->mcei_pa = UINT64_MAX;
+	if (encode->mcei_board != 0 || encode->mcei_chan != 0) {
+		encode->mcei_err = (uint32_t)ZEN_UMC_DECODE_F_CANNOT_MAP_FABID;
+		encode->mcei_errdata = 0;
+		return;
+	}
+
+	chan = zen_umc_find_chan_by_id(umc, encode->mcei_chip, encode->mcei_die,
+	    encode->mcei_mc);
+	if (chan == NULL) {
+		encode->mcei_err = (uint32_t)ZEN_UMC_DECODE_F_CANNOT_MAP_FABID;
+		encode->mcei_errdata = encode->mcei_mc;
+		return;
+	}
+
+	bzero(&dec, sizeof (dec));
+	if (!zen_umc_decode_norm_addr(umc, chan, encode->mcei_chan_addr,
+	    &dec)) {
+		encode->mcei_err = (uint32_t)dec.dec_fail;
+		encode->mcei_errdata = dec.dec_fail_data;
+		encode->mcei_pa = dec.dec_pa;
+		return;
+	}
+
+	zen_umc_ioctl_fill_decode(umc, &dec, encode);
 }
 
 static void
@@ -3771,7 +3888,7 @@ zen_umc_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 	}
 
 	switch (cmd) {
-	case MC_IOC_DECODE_PA:
+	case MC_IOC_DECODE_ADDR:
 		if (crgetzoneid(credp) != GLOBAL_ZONEID ||
 		    drv_priv(credp) != 0) {
 			ret = EPERM;
@@ -3784,8 +3901,21 @@ zen_umc_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 			break;
 		}
 
-		zen_umc_ioctl_decode(umc, &encode);
 		ret = 0;
+		switch (encode.mcei_type) {
+		case MET_PHYS_ADDR:
+			zen_umc_ioctl_decode_phys_addr(umc, &encode);
+			break;
+		case MET_CHAN_ADDR:
+			zen_umc_ioctl_decode_chan_addr(umc, &encode);
+			break;
+		default:
+			ret = ENOTSUP;
+			break;
+		}
+
+		if (ret != 0)
+			break;
 
 		if (ddi_copyout(&encode, (void *)arg, sizeof (encode),
 		    mode & FKIOCTL) != 0) {

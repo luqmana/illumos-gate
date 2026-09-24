@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2022 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef _SYS_BITEXT_H
@@ -40,6 +40,7 @@ extern uint32_t bitset32(uint32_t, uint_t, uint_t, uint32_t);
 extern uint64_t bitset64(uint64_t, uint_t, uint_t, uint64_t);
 
 extern uint64_t bitdel64(uint64_t, uint_t, uint_t);
+extern uint64_t bitins64(uint64_t, uint_t, uint_t, uint64_t);
 
 #ifdef __cplusplus
 }
