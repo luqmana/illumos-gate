@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -32,10 +32,82 @@
 #define	ZEN_UMC_TOM2_RSVD_END	0x10000000000ULL
 
 /*
- * COD based hashing constants.
+ * COD/NPS based hashing constants.
  */
 #define	ZEN_UMC_COD_NBITS	3
 #define	ZEN_UMC_NPS_MOD_NBITS	3
+#define	ZEN_UMC_NPS_MOD_MAX	5
+#define	ZEN_UMC_HASH_NBITS	5
+
+/*
+ * Common parameters shared by COD/NPS (1K/2K power of 2) hashes between the
+ * denormalization skeleton and fill steps.
+ */
+typedef struct zen_umc_denorm_hash_params {
+	/*
+	 * The number of bits removed at the rule's starting address before
+	 * jumping to bit 12.
+	 */
+	uint_t		zhp_nstart;
+	/*
+	 * The total number of interleave bits (socket + channel).
+	 */
+	uint_t		zhp_nbits;
+	/*
+	 * The number of socket interleave bits.
+	 */
+	uint_t		zhp_nsock;
+	/*
+	 * These represent the same address/adjustment bit tables used by
+	 * the forward hash functions.
+	 */
+	uint32_t	zhp_addr_bits[ZEN_UMC_HASH_NBITS];
+	uint32_t	zhp_adj[ZEN_UMC_HASH_NBITS];
+	/*
+	 * Whether to use DF v4.0 semantics when adding bit 14.
+	 */
+	boolean_t	zhp_df4p0;
+	/*
+	 * NPS vs COD style.
+	 */
+	boolean_t	zhp_nps_hash;
+} zen_umc_denorm_hash_params_t;
+
+/*
+ * Working state used as part of going from a channel normalized address back to
+ * system physical addresses.
+ */
+typedef struct zen_umc_denorm {
+	/*
+	 * The normalized address with the channel offset removed.
+	 */
+	uint64_t	zd_adj;
+	/*
+	 * The target values of the interleave hash bits that need to be
+	 * re-derived. The meaning of each index depends on the interleave mode.
+	 */
+	uint8_t		zd_hashes[ZEN_UMC_HASH_NBITS];
+	boolean_t	zd_hash_used[ZEN_UMC_HASH_NBITS];
+	/*
+	 * Indicates the Zen 3 6-channel hash special case where the two upper
+	 * most bits are set. See the zen_umc.c big theory statement for all
+	 * the fun details.
+	 */
+	boolean_t	zd_6ch_special;
+	/*
+	 * Candidate physical addresses prior to the base and DRAM hole being
+	 * re-applied and prior to hashed bits being filled in.  The maximum
+	 * number of candidates is the largest possible modulus.
+	 */
+	uint_t		zd_ncands;
+	uint64_t	zd_cands[ZEN_UMC_NPS_MOD_MAX];
+} zen_umc_denorm_t;
+
+/*
+ * Bit positions used by the NPS 1K/2K non-power of 2 hash, indexed by
+ * zen_umc_np2_k_hash_t.
+ */
+static const uint32_t zen_umc_np2_k_hash_bits[4] = { 8, 9, 12, 13 };
 
 /*
  * Enumeration that represents which parts of the NPS 1K/2K non-power of 2 hash
@@ -261,6 +333,25 @@ const zen_umc_np2_k_rule_t zen_umc_np2_k_rules[] = { {
 } };
 
 /*
+ * Find the corresponding NPS 1K/2K non-power of 2 rule entry.
+ */
+static const zen_umc_np2_k_rule_t *
+zen_umc_decode_np2_k_rule(zen_umc_decoder_t *dec)
+{
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+
+	for (size_t i = 0; i < ARRAY_SIZE(zen_umc_np2_k_rules); i++) {
+		if (rule->ddr_chan_ileave == zen_umc_np2_k_rules[i].zukr_type) {
+			return (&zen_umc_np2_k_rules[i]);
+		}
+	}
+
+	dec->dec_fail = ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP;
+	dec->dec_fail_data = rule->ddr_chan_ileave;
+	return (NULL);
+}
+
+/*
  * We want to apply some initial heuristics to determine if a physical address
  * is DRAM before we proceed because of the MMIO hole and related. The DRAM
  * ranges can overlap with these system reserved ranges so we have to manually
@@ -420,6 +511,52 @@ zen_umc_adjust_dram_addr(const zen_umc_t *umc, zen_umc_decoder_t *dec,
 }
 
 /*
+ * The inverse of zen_umc_adjust_dram_addr(); this returns the corresponding
+ * system address for the given rule-relative address. This also takes care of
+ * adjusting for the DRAM hole if the resulting address would otherwise land at
+ * or above the start of the hole.
+ */
+static uint64_t
+zen_umc_unadjust_dram_addr(const zen_umc_t *umc, const zen_umc_decoder_t *dec,
+    uint64_t addr)
+{
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+	const zen_umc_df_t *df = dec->dec_df_rulesrc;
+	uint64_t pa = addr + rule->ddr_base;
+
+	if ((rule->ddr_flags & DF_DRAM_F_HOLE) != 0 &&
+	    (df->zud_flags & ZEN_UMC_DF_F_HOLE_VALID) != 0) {
+		const uint64_t hole_base = umc->umc_dfs[0].zud_hole_base;
+
+		if (pa >= hole_base) {
+			pa += ZEN_UMC_TOM2_START - hole_base;
+		}
+	}
+
+	return (pa);
+}
+
+/*
+ * Determine whether the address that hardware feeds into the interleave logic
+ * is the raw system address or one that has had the rule's base and the DRAM
+ * hole subtracted from it.
+ */
+static boolean_t
+zen_umc_ileave_uses_raw_addr(const zen_umc_t *umc, const df_dram_rule_t *rule)
+{
+	if (umc->umc_df_rev <= DF_REV_3 &&
+	    rule->ddr_chan_ileave != DF_CHAN_ILEAVE_6CH) {
+		return (B_TRUE);
+	}
+
+	if (umc->umc_df_rev >= DF_REV_4D2) {
+		return (B_TRUE);
+	}
+
+	return (B_FALSE);
+}
+
+/*
  * Take care of constructing the address we need to use for determining the
  * interleaving target fabric id. See the big theory statement in zen_umc.c for
  * more on this.
@@ -429,9 +566,7 @@ zen_umc_determine_ileave_addr(const zen_umc_t *umc, zen_umc_decoder_t *dec)
 {
 	const df_dram_rule_t *rule = dec->dec_df_rule;
 
-	if ((umc->umc_df_rev <= DF_REV_3 &&
-	    rule->ddr_chan_ileave != DF_CHAN_ILEAVE_6CH) ||
-	    umc->umc_df_rev >= DF_REV_4D2) {
+	if (zen_umc_ileave_uses_raw_addr(umc, rule)) {
 		dec->dec_ilv_pa = dec->dec_pa;
 		return (B_TRUE);
 	}
@@ -914,6 +1049,62 @@ zen_umc_decode_hash_nps_k_mod(const df_dram_rule_t *rule, uint64_t pa,
 }
 
 /*
+ * Common parameters for the Zen 4 non-power of 2 hashes.
+ */
+static boolean_t
+zen_umc_decode_nps_mod_params(zen_umc_decoder_t *dec, uint_t *modp,
+    uint_t *nchanp)
+{
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+	uint_t mod, chan_bits;
+
+	switch (rule->ddr_chan_ileave) {
+	case DF_CHAN_ILEAVE_NPS4_3CH:
+		mod = 3;
+		chan_bits = 1;
+		break;
+	case DF_CHAN_ILEAVE_NPS2_5CH:
+		mod = 5;
+		chan_bits = 1;
+		break;
+	case DF_CHAN_ILEAVE_NPS2_6CH:
+		mod = 3;
+		chan_bits = 2;
+		break;
+	case DF_CHAN_ILEAVE_NPS1_10CH:
+		mod = 5;
+		chan_bits = 2;
+		break;
+	case DF_CHAN_ILEAVE_NPS1_12CH:
+		mod = 3;
+		chan_bits = 3;
+		break;
+	default:
+		dec->dec_fail = ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP;
+		dec->dec_fail_data = rule->ddr_chan_ileave;
+		return (B_FALSE);
+	}
+
+	/*
+	 * None of these support die interleaving.
+	 */
+	if (rule->ddr_die_ileave_bits != 0) {
+		dec->dec_fail = ZEN_UMC_DECODE_F_NPS_BAD_ILEAVE;
+		dec->dec_fail_data = dec->dec_df_ruleno;
+		return (B_FALSE);
+	}
+
+	ASSERT3U(mod, <=, ZEN_UMC_NPS_MOD_MAX);
+
+	if (modp != NULL)
+		*modp = mod;
+	if (nchanp != NULL)
+		*nchanp = chan_bits;
+
+	return (B_TRUE);
+}
+
+/*
  * See the big theory statement in zen_umc.c which describes the rules for this
  * computation. This is a little less weird than the Zen 3 one, but still,
  * unique.
@@ -932,19 +1123,8 @@ zen_umc_decode_ileave_nps_mod(const zen_umc_t *umc, zen_umc_decoder_t *dec)
 	}
 
 	nsock_bit = rule->ddr_sock_ileave_bits;
-	switch (rule->ddr_chan_ileave) {
-	case DF_CHAN_ILEAVE_NPS4_3CH:
-	case DF_CHAN_ILEAVE_NPS2_6CH:
-	case DF_CHAN_ILEAVE_NPS1_12CH:
-		chan_mod = 3;
-		break;
-	case DF_CHAN_ILEAVE_NPS2_5CH:
-	case DF_CHAN_ILEAVE_NPS1_10CH:
-		chan_mod = 5;
-		break;
-	default:
-		dec->dec_fail = ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP;
-		dec->dec_fail_data = rule->ddr_chan_ileave;
+
+	if (!zen_umc_decode_nps_mod_params(dec, &chan_mod, NULL)) {
 		return (B_FALSE);
 	}
 
@@ -1000,16 +1180,7 @@ zen_umc_decode_ileave_nps_k_mod(const zen_umc_t *umc, zen_umc_decoder_t *dec)
 	const df_dram_rule_t *rule = dec->dec_df_rule;
 	const zen_umc_np2_k_rule_t *np2 = NULL;
 
-	for (size_t i = 0; i < ARRAY_SIZE(zen_umc_np2_k_rules); i++) {
-		if (rule->ddr_chan_ileave == zen_umc_np2_k_rules[i].zukr_type) {
-			np2 = &zen_umc_np2_k_rules[i];
-			break;
-		}
-	}
-
-	if (np2 == NULL) {
-		dec->dec_fail = ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP;
-		dec->dec_fail_data = rule->ddr_chan_ileave;
+	if ((np2 = zen_umc_decode_np2_k_rule(dec)) == NULL) {
 		return (B_FALSE);
 	}
 
@@ -1046,6 +1217,7 @@ zen_umc_decode_ileave_nps_k_mod(const zen_umc_t *umc, zen_umc_decoder_t *dec)
 		}
 	}
 
+	ASSERT3U(np2->zukr_mod, <=, ZEN_UMC_NPS_MOD_MAX);
 	mod_val = (uint32_t)(mod_addr % np2->zukr_mod);
 	chan = mod_val << np2->zukr_chan_mod_shift;
 	for (uint32_t i = 0; i < np2->zukr_chan_mod_shift; i++) {
@@ -1483,30 +1655,8 @@ zen_umc_decode_normalize_nps_mod(const zen_umc_t *umc, zen_umc_decoder_t *dec)
 	const df_dram_rule_t *rule = dec->dec_df_rule;
 
 	sock_bits = rule->ddr_sock_ileave_bits;
-	switch (rule->ddr_chan_ileave) {
-	case DF_CHAN_ILEAVE_NPS4_3CH:
-		chan_mod = 3;
-		nbits = 1;
-		break;
-	case DF_CHAN_ILEAVE_NPS2_5CH:
-		chan_mod = 5;
-		nbits = 1;
-		break;
-	case DF_CHAN_ILEAVE_NPS2_6CH:
-		chan_mod = 3;
-		nbits = 2;
-		break;
-	case DF_CHAN_ILEAVE_NPS1_10CH:
-		chan_mod = 5;
-		nbits = 2;
-		break;
-	case DF_CHAN_ILEAVE_NPS1_12CH:
-		chan_mod = 3;
-		nbits = 3;
-		break;
-	default:
-		dec->dec_fail = ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP;
-		dec->dec_fail_data = rule->ddr_chan_ileave;
+
+	if (!zen_umc_decode_nps_mod_params(dec, &chan_mod, &nbits)) {
 		return (B_FALSE);
 	}
 
@@ -1565,16 +1715,7 @@ zen_umc_decode_normalize_nps_k_mod(const zen_umc_t *umc, zen_umc_decoder_t *dec)
 	const df_dram_rule_t *rule = dec->dec_df_rule;
 	const zen_umc_np2_k_rule_t *np2 = NULL;
 
-	for (size_t i = 0; i < ARRAY_SIZE(zen_umc_np2_k_rules); i++) {
-		if (rule->ddr_chan_ileave == zen_umc_np2_k_rules[i].zukr_type) {
-			np2 = &zen_umc_np2_k_rules[i];
-			break;
-		}
-	}
-
-	if (np2 == NULL) {
-		dec->dec_fail = ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP;
-		dec->dec_fail_data = rule->ddr_chan_ileave;
+	if ((np2 = zen_umc_decode_np2_k_rule(dec)) == NULL) {
 		return (B_FALSE);
 	}
 
@@ -2199,4 +2340,1167 @@ zen_umc_decode_pa(const zen_umc_t *umc, const uint64_t pa,
 	 * Somehow, that's it.
 	 */
 	return (B_TRUE);
+}
+
+/*
+ * Returns the number of channel interleave targets that a rule spreads across
+ * within a single socket and die, i.e. the maximum value of the channel
+ * interleave ID plus one.
+ */
+static uint32_t
+zen_umc_ileave_nchan(df_chan_ileave_t ileave)
+{
+	switch (ileave) {
+	case DF_CHAN_ILEAVE_1CH:
+		return (1);
+	case DF_CHAN_ILEAVE_2CH:
+	case DF_CHAN_ILEAVE_COD4_2CH:
+	case DF_CHAN_ILEAVE_NPS4_2CH:
+	case DF_CHAN_ILEAVE_NPS4_2CH_1K:
+	case DF_CHAN_ILEAVE_NPS4_2CH_2K:
+		return (2);
+	case DF_CHAN_ILEAVE_NPS4_3CH:
+	case DF_CHAN_ILEAVE_NPS4_3CH_1K:
+	case DF_CHAN_ILEAVE_NPS4_3CH_2K:
+		return (3);
+	case DF_CHAN_ILEAVE_4CH:
+	case DF_CHAN_ILEAVE_COD2_4CH:
+	case DF_CHAN_ILEAVE_NPS2_4CH:
+	case DF_CHAN_ILEAVE_NPS2_4CH_1K:
+	case DF_CHAN_ILEAVE_NPS2_4CH_2K:
+		return (4);
+	case DF_CHAN_ILEAVE_NPS2_5CH:
+	case DF_CHAN_ILEAVE_NPS2_5CH_1K:
+	case DF_CHAN_ILEAVE_NPS2_5CH_2K:
+		return (5);
+	case DF_CHAN_ILEAVE_6CH:
+	case DF_CHAN_ILEAVE_NPS2_6CH:
+	case DF_CHAN_ILEAVE_NPS2_6CH_1K:
+	case DF_CHAN_ILEAVE_NPS2_6CH_2K:
+		return (6);
+	case DF_CHAN_ILEAVE_8CH:
+	case DF_CHAN_ILEAVE_COD1_8CH:
+	case DF_CHAN_ILEAVE_NPS1_8CH:
+	case DF_CHAN_ILEAVE_NPS1_8CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_8CH_2K:
+		return (8);
+	case DF_CHAN_ILEAVE_NPS1_10CH:
+	case DF_CHAN_ILEAVE_NPS1_10CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_10CH_2K:
+		return (10);
+	case DF_CHAN_ILEAVE_NPS1_12CH:
+	case DF_CHAN_ILEAVE_NPS1_12CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_12CH_2K:
+	/*
+	 * The 24 channel variants always require socket interleaving, so from
+	 * the perspective of a single socket there are only 12 targets.
+	 */
+	case DF_CHAN_ILEAVE_NPS0_24CH_1K:
+	case DF_CHAN_ILEAVE_NPS0_24CH_2K:
+		return (12);
+	case DF_CHAN_ILEAVE_16CH:
+	case DF_CHAN_ILEAVE_NPS1_16CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_16CH_2K:
+		return (16);
+	case DF_CHAN_ILEAVE_32CH:
+		return (32);
+	case DF_CHAN_ILEAVE_MI3H_8CH:
+	case DF_CHAN_ILEAVE_MI3H_16CH:
+	case DF_CHAN_ILEAVE_MI3H_32CH:
+	default:
+		return (0);
+	}
+}
+
+/*
+ * Find a channel by its logical channel id for the given socket/die.
+ */
+const zen_umc_chan_t *
+zen_umc_find_chan_by_id(const zen_umc_t *umc, uint32_t sock, uint32_t die,
+    uint32_t logid)
+{
+	for (uint_t dfno = 0; dfno < umc->umc_ndfs; dfno++) {
+		const zen_umc_df_t *df = &umc->umc_dfs[dfno];
+		for (uint_t umcno = 0; umcno < df->zud_nchan; umcno++) {
+			const zen_umc_chan_t *chan = &df->zud_chan[umcno];
+			uint32_t csock, cdie;
+
+			if (chan->chan_logid != logid)
+				continue;
+
+			zen_fabric_id_decompose(&umc->umc_decomp,
+			    chan->chan_fabid, &csock, &cdie, NULL);
+			if (csock == sock && cdie == die)
+				return (chan);
+		}
+	}
+	return (NULL);
+}
+
+/*
+ * Find the DRAM rule in the UMC that covers the normalized address and remove
+ * its offset. Recall that rule 0 never has an offset and that each subsequent
+ * rule's offset indicates where its normalized addresses begin. We walk from
+ * the highest rule down so that the highest offset at or below the address
+ * wins. An enabled rule with a disabled offset is treated as starting at zero.
+ * This is roughly the inverse of the tail of zen_umc_decode_sysaddr_to_norm().
+ */
+static boolean_t
+zen_umc_denorm_find_umc_rule(const zen_umc_t *umc, zen_umc_decoder_t *dec,
+    zen_umc_denorm_t *zd)
+{
+	const zen_umc_chan_t *chan = dec->dec_umc_chan;
+
+	for (uint32_t i = chan->chan_nrules; i > 0; i--) {
+		const uint32_t ruleno = i - 1;
+		const df_dram_rule_t *rule = &chan->chan_rules[ruleno];
+		uint64_t offset = 0;
+
+		if ((rule->ddr_flags & DF_DRAM_F_VALID) == 0) {
+			continue;
+		}
+
+		if (ruleno > 0) {
+			const chan_offset_t *off =
+			    &chan->chan_offsets[ruleno - 1];
+
+			if (off->cho_valid) {
+				offset = off->cho_offset;
+			}
+		}
+
+		if (dec->dec_norm_addr < offset) {
+			continue;
+		}
+
+		dec->dec_umc_ruleno = ruleno;
+		zd->zd_adj = dec->dec_norm_addr - offset;
+		return (B_TRUE);
+	}
+
+	dec->dec_fail = ZEN_UMC_DECODE_F_NORM_NO_UMC_RULE;
+	dec->dec_fail_data = dec->dec_norm_addr;
+	return (B_FALSE);
+}
+
+/*
+ * This finds the CCM rule with the same range as the UMC rule found by
+ * zen_umc_denorm_find_umc_rule(). This matches the behaviour of the forward
+ * path which always uses the primary CCM rule for interleave and remap details.
+ */
+static boolean_t
+zen_umc_denorm_find_df_rule(const zen_umc_t *umc, zen_umc_decoder_t *dec)
+{
+	const zen_umc_df_t *df = &umc->umc_dfs[0];
+	const zen_umc_chan_t *chan = dec->dec_umc_chan;
+	const df_dram_rule_t *urule = &chan->chan_rules[dec->dec_umc_ruleno];
+
+	for (uint_t i = 0; i < df->zud_dram_nrules; i++) {
+		const df_dram_rule_t *rule = &df->zud_rules[i];
+
+		if ((rule->ddr_flags & DF_DRAM_F_VALID) == 0)
+			continue;
+
+		if (rule->ddr_base == urule->ddr_base &&
+		    rule->ddr_limit == urule->ddr_limit) {
+			dec->dec_df_ruleno = i;
+			dec->dec_df_rule = rule;
+			dec->dec_df_rulesrc = df;
+			return (B_TRUE);
+		}
+	}
+
+	dec->dec_fail = ZEN_UMC_DECODE_F_NORM_NO_DF_RULE;
+	dec->dec_fail_data = dec->dec_umc_ruleno;
+	return (B_FALSE);
+}
+
+/*
+ * Work backwards from the channel's fabric ID to the socket, die, and channel
+ * values that the interleave logic must have produced. This is the inverse of
+ * the tail of zen_umc_decode_sysaddr_to_csid().
+ */
+static boolean_t
+zen_umc_denorm_ileave_ids(const zen_umc_t *umc, zen_umc_decoder_t *dec)
+{
+	uint32_t sock, die, comp, logcomp, nchan;
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+	const zen_umc_chan_t *chan = dec->dec_umc_chan;
+
+	dec->dec_targ_fabid = chan->chan_fabid;
+	zen_fabric_id_decompose(&umc->umc_decomp, dec->dec_targ_fabid, &sock,
+	    &die, &comp);
+	logcomp = comp;
+
+	/*
+	 * If remapping is enabled, the component ID derived from the (channel)
+	 * target fabric ID is that of the physical component rather than the
+	 * original logical component. To find it, we search the appropriate
+	 * remap table for a matching entry.
+	 */
+	if ((rule->ddr_flags & DF_DRAM_F_REMAP_EN) != 0) {
+		uint32_t remap_ruleset;
+		const zen_umc_cs_remap_t *remap;
+		boolean_t found = B_FALSE;
+
+		if ((rule->ddr_flags & DF_DRAM_F_REMAP_SOCK) != 0) {
+			remap_ruleset = sock;
+		} else {
+			remap_ruleset = rule->ddr_remap_ent;
+		}
+
+		if (remap_ruleset >= dec->dec_df_rulesrc->zud_cs_nremap) {
+			dec->dec_fail = ZEN_UMC_DECODE_F_BAD_REMAP_SET;
+			dec->dec_fail_data = remap_ruleset;
+			return (B_FALSE);
+		}
+
+		remap = &dec->dec_df_rulesrc->zud_remap[remap_ruleset];
+		for (uint_t i = 0; i < remap->csr_nremaps; i++) {
+			if (remap->csr_remaps[i] == comp) {
+				logcomp = i;
+				found = B_TRUE;
+				break;
+			}
+		}
+
+		if (!found) {
+			dec->dec_fail = ZEN_UMC_DECODE_F_NORM_NO_REMAP_ENTRY;
+			dec->dec_fail_data = comp;
+			return (B_FALSE);
+		}
+
+		if ((logcomp & ~umc->umc_decomp.dfd_comp_mask) != 0) {
+			dec->dec_fail = ZEN_UMC_DECODE_F_REMAP_HAS_BAD_COMP;
+			dec->dec_fail = logcomp;
+			return (B_FALSE);
+		}
+
+		dec->dec_remap_comp = comp;
+		zen_fabric_id_compose(&umc->umc_decomp, sock, die, logcomp,
+		    &dec->dec_log_fabid);
+	} else {
+		dec->dec_log_fabid = dec->dec_targ_fabid;
+	}
+
+	if (dec->dec_log_fabid < rule->ddr_dest_fabid) {
+		dec->dec_fail = ZEN_UMC_DECODE_F_NORM_FABID_RULE_MISMATCH;
+		dec->dec_fail_data = dec->dec_log_fabid;
+		return (B_FALSE);
+	}
+
+	/*
+	 * At this point, with the base fabric ID from the rule and a logical
+	 * fabric ID, we can compute the interleave bits.
+	 */
+	dec->dec_ilv_fabid = dec->dec_log_fabid - rule->ddr_dest_fabid;
+	zen_fabric_id_decompose(&umc->umc_decomp, dec->dec_ilv_fabid,
+	    &dec->dec_ilv_sock, &dec->dec_ilv_die, &dec->dec_ilv_chan);
+
+	/*
+	 * Finally, make sure that the interleave values we derived are ones
+	 * that this rule could have produced.
+	 */
+	nchan = zen_umc_ileave_nchan(rule->ddr_chan_ileave);
+	if (nchan == 0) {
+		dec->dec_fail = ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP;
+		dec->dec_fail_data = rule->ddr_chan_ileave;
+		return (B_FALSE);
+	}
+
+	if (dec->dec_ilv_chan >= nchan ||
+	    dec->dec_ilv_sock >= (1U << rule->ddr_sock_ileave_bits) ||
+	    dec->dec_ilv_die >= (1U << rule->ddr_die_ileave_bits)) {
+		dec->dec_fail = ZEN_UMC_DECODE_F_NORM_ILEAVE_RULE_MISMATCH;
+		dec->dec_fail_data = dec->dec_ilv_fabid;
+		return (B_FALSE);
+	}
+
+	return (B_TRUE);
+}
+
+/*
+ * This implements the inverse for non-hashing interleave modes and thus returns
+ * at most 1 candidate. The inverse of zen_umc_decode_normalize_nohash().
+ */
+static boolean_t
+zen_umc_denorm_nohash(const zen_umc_t *umc, zen_umc_decoder_t *dec,
+    zen_umc_denorm_t *zd)
+{
+	uint_t nchan_bit, ndie_bit, nsock_bit, nbits;
+	uint64_t val, addr;
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+
+	nsock_bit = rule->ddr_sock_ileave_bits;
+	ndie_bit = rule->ddr_die_ileave_bits;
+
+	switch (rule->ddr_chan_ileave) {
+	case DF_CHAN_ILEAVE_1CH:
+		nchan_bit = 0;
+		break;
+	case DF_CHAN_ILEAVE_2CH:
+		nchan_bit = 1;
+		break;
+	case DF_CHAN_ILEAVE_4CH:
+		nchan_bit = 2;
+		break;
+	case DF_CHAN_ILEAVE_8CH:
+		nchan_bit = 3;
+		break;
+	case DF_CHAN_ILEAVE_16CH:
+		nchan_bit = 4;
+		break;
+	case DF_CHAN_ILEAVE_32CH:
+		nchan_bit = 5;
+		break;
+	default:
+		dec->dec_fail = ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP;
+		dec->dec_fail_data = rule->ddr_chan_ileave;
+		return (B_FALSE);
+	}
+
+	addr = zd->zd_adj;
+
+	nbits = nchan_bit + ndie_bit + nsock_bit;
+	if (nbits > 0) {
+		const uint_t start = rule->ddr_addr_start;
+
+		val = dec->dec_ilv_chan;
+		val |= (uint64_t)dec->dec_ilv_die << nchan_bit;
+		val |= (uint64_t)dec->dec_ilv_sock << (nchan_bit + ndie_bit);
+		addr = bitins64(addr, start + nbits - 1, start, val);
+	}
+
+	zd->zd_cands[0] = addr;
+	zd->zd_ncands = 1;
+	return (B_TRUE);
+}
+
+/*
+ * This initializes the common parameters shared by COD/NPS (1K/2K power of 2)
+ * hashes we'll use during the denormalization steps.
+ */
+static boolean_t
+zen_umc_denorm_hash_params_init(zen_umc_decoder_t *dec,
+    zen_umc_denorm_hash_params_t *zhp)
+{
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+	const uint32_t adj_norm[5] = { 0, 1, 2, 3, 4 };
+	const uint32_t adj_2k[4] = { 0, 2, 3, 4 };
+	const uint32_t addr_bits_cod[3] = { rule->ddr_addr_start, 12, 13 };
+	const uint32_t addr_bits_nps[4] = { rule->ddr_addr_start, 12, 13, 14 };
+	const uint32_t addr_bits_1k[5] = { rule->ddr_addr_start, 9, 12, 13,
+	    14 };
+	const uint32_t addr_bits_2k[4] = { rule->ddr_addr_start, 12, 13, 14 };
+	uint_t nbits, nstart;
+
+	bzero(zhp, sizeof (*zhp));
+	zhp->zhp_nps_hash = B_TRUE;
+
+	switch (rule->ddr_chan_ileave) {
+	case DF_CHAN_ILEAVE_COD4_2CH:
+	case DF_CHAN_ILEAVE_COD2_4CH:
+	case DF_CHAN_ILEAVE_COD1_8CH:
+		if (rule->ddr_sock_ileave_bits != 0 ||
+		    rule->ddr_die_ileave_bits != 0) {
+			dec->dec_fail = ZEN_UMC_DECODE_F_COD_BAD_ILEAVE;
+			dec->dec_fail_data = dec->dec_df_ruleno;
+			return (B_FALSE);
+		}
+		bcopy(addr_bits_cod, zhp->zhp_addr_bits,
+		    sizeof (addr_bits_cod));
+		bcopy(adj_norm, zhp->zhp_adj, sizeof (adj_norm));
+		zhp->zhp_nps_hash = B_FALSE;
+		nstart = 1;
+		break;
+	case DF_CHAN_ILEAVE_NPS4_2CH:
+	case DF_CHAN_ILEAVE_NPS2_4CH:
+	case DF_CHAN_ILEAVE_NPS1_8CH:
+		if (rule->ddr_die_ileave_bits != 0) {
+			dec->dec_fail = ZEN_UMC_DECODE_F_NPS_BAD_ILEAVE;
+			dec->dec_fail_data = dec->dec_df_ruleno;
+			return (B_FALSE);
+		}
+		bcopy(addr_bits_nps, zhp->zhp_addr_bits,
+		    sizeof (addr_bits_nps));
+		bcopy(adj_norm, zhp->zhp_adj, sizeof (adj_norm));
+		zhp->zhp_df4p0 = B_TRUE;
+		nstart = 1;
+		break;
+	case DF_CHAN_ILEAVE_NPS4_2CH_1K:
+	case DF_CHAN_ILEAVE_NPS2_4CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_8CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_16CH_1K:
+		if (rule->ddr_die_ileave_bits != 0 ||
+		    rule->ddr_addr_start != 8) {
+			dec->dec_fail = ZEN_UMC_DECODE_F_NPS_BAD_ILEAVE;
+			dec->dec_fail_data = dec->dec_df_ruleno;
+			return (B_FALSE);
+		}
+		bcopy(addr_bits_1k, zhp->zhp_addr_bits, sizeof (addr_bits_1k));
+		bcopy(adj_norm, zhp->zhp_adj, sizeof (adj_norm));
+		nstart = 2;
+		break;
+	case DF_CHAN_ILEAVE_NPS4_2CH_2K:
+	case DF_CHAN_ILEAVE_NPS2_4CH_2K:
+	case DF_CHAN_ILEAVE_NPS1_8CH_2K:
+	case DF_CHAN_ILEAVE_NPS1_16CH_2K:
+		if (rule->ddr_die_ileave_bits != 0 ||
+		    rule->ddr_addr_start != 8) {
+			dec->dec_fail = ZEN_UMC_DECODE_F_NPS_BAD_ILEAVE;
+			dec->dec_fail_data = dec->dec_df_ruleno;
+			return (B_FALSE);
+		}
+		bcopy(addr_bits_2k, zhp->zhp_addr_bits, sizeof (addr_bits_2k));
+		bcopy(adj_2k, zhp->zhp_adj, sizeof (adj_2k));
+		nstart = 1;
+		break;
+	default:
+		dec->dec_fail = ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP;
+		dec->dec_fail_data = rule->ddr_chan_ileave;
+		return (B_FALSE);
+	}
+
+	switch (rule->ddr_chan_ileave) {
+	case DF_CHAN_ILEAVE_COD4_2CH:
+	case DF_CHAN_ILEAVE_NPS4_2CH:
+	case DF_CHAN_ILEAVE_NPS4_2CH_1K:
+	case DF_CHAN_ILEAVE_NPS4_2CH_2K:
+		nbits = 1;
+		break;
+	case DF_CHAN_ILEAVE_COD2_4CH:
+	case DF_CHAN_ILEAVE_NPS2_4CH:
+	case DF_CHAN_ILEAVE_NPS2_4CH_1K:
+	case DF_CHAN_ILEAVE_NPS2_4CH_2K:
+		nbits = 2;
+		break;
+	case DF_CHAN_ILEAVE_COD1_8CH:
+	case DF_CHAN_ILEAVE_NPS1_8CH:
+	case DF_CHAN_ILEAVE_NPS1_8CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_8CH_2K:
+		nbits = 3;
+		break;
+	case DF_CHAN_ILEAVE_NPS1_16CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_16CH_2K:
+		nbits = 4;
+		break;
+	default:
+		dec->dec_fail = ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP;
+		dec->dec_fail_data = rule->ddr_chan_ileave;
+		return (B_FALSE);
+	}
+	nbits += rule->ddr_sock_ileave_bits;
+
+	ASSERT3U(nbits, <=, ZEN_UMC_HASH_NBITS);
+
+	/*
+	 * Don't remove more bits from the start than exist.
+	 */
+	if (nstart > nbits) {
+		nstart = nbits;
+	}
+
+	zhp->zhp_nstart = nstart;
+	zhp->zhp_nbits = nbits;
+	zhp->zhp_nsock = rule->ddr_sock_ileave_bits;
+	return (B_TRUE);
+}
+
+/*
+ * The inverse of zen_umc_decode_normalize_hash(). Re-insert zeros where the
+ * interleave bits used to be, in the reverse order of their removal. The actual
+ * values are filled in later by zen_umc_denorm_hash_fill() once we know the
+ * address that the hash was computed over.
+ */
+static boolean_t
+zen_umc_denorm_hash(const zen_umc_t *umc, zen_umc_decoder_t *dec,
+    zen_umc_denorm_t *zd)
+{
+	uint_t nstart, nbits, nsock;
+	uint64_t addr;
+	zen_umc_denorm_hash_params_t zhp;
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+
+	if (!zen_umc_denorm_hash_params_init(dec, &zhp)) {
+		return (B_FALSE);
+	}
+
+	nstart = zhp.zhp_nstart;
+	nbits = zhp.zhp_nbits;
+	nsock = zhp.zhp_nsock;
+
+	addr = zd->zd_adj;
+
+	if (nstart > 0) {
+		addr = bitins64(addr, rule->ddr_addr_start + nstart - 1,
+		    rule->ddr_addr_start, 0);
+	}
+
+	if (nbits > nstart) {
+		uint_t start = 12;
+		uint_t end = start + (nbits - nstart - 1);
+		addr = bitins64(addr, end, start, 0);
+	}
+
+	/*
+	 * Record the target hash values. When socket interleaving is enabled,
+	 * the first hash bit is the socket and the rest are the channel.
+	 */
+	for (uint_t i = 0; i < nbits; i++) {
+		if (nsock > 0) {
+			if (i == 0) {
+				zd->zd_hashes[i] = dec->dec_ilv_sock & 1;
+			} else {
+				zd->zd_hashes[i] = bitx32(dec->dec_ilv_chan,
+				    i - 1, i - 1);
+			}
+		} else {
+			zd->zd_hashes[i] = bitx32(dec->dec_ilv_chan, i, i);
+		}
+		zd->zd_hash_used[i] = B_TRUE;
+	}
+
+	zd->zd_cands[0] = addr;
+	zd->zd_ncands = 1;
+	return (B_TRUE);
+}
+
+/*
+ * This solves for the bits originally removed in a COD/NPS(/1K/2K power of 2)
+ * hash, i.e. inverse of zen_umc_decode_ileave_cod() and
+ * zen_umc_decode_ileave_nps_common().
+ */
+static boolean_t
+zen_umc_denorm_hash_fill(const zen_umc_t *umc, zen_umc_decoder_t *dec,
+    const zen_umc_denorm_t *zd, uint64_t src, uint64_t *addrp)
+{
+	zen_umc_denorm_hash_params_t zhp;
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+	uint64_t addr = *addrp;
+	const uint32_t *addr_bits, *adj;
+	boolean_t df4p0, nps_hash;
+	uint_t nsock;
+
+	if (!zen_umc_denorm_hash_params_init(dec, &zhp)) {
+		return (B_FALSE);
+	}
+
+	addr_bits = zhp.zhp_addr_bits;
+	adj = zhp.zhp_adj;
+	df4p0 = zhp.zhp_df4p0;
+	nps_hash = zhp.zhp_nps_hash;
+	nsock = zhp.zhp_nsock;
+
+	for (uint_t i = 0; i < zhp.zhp_nbits; i++) {
+		uint8_t hash = zd->zd_hashes[i];
+
+		/*
+		 * Strict DF v4.0 NPS style hashes add in bit 14 to the hash
+		 * for the first bit if socket interleaving is disabled.
+		 */
+		if (i == 0 && nsock == 0 && df4p0) {
+			hash ^= bitx64(src, 14, 14);
+		}
+
+		/*
+		 * The 1T portion of the address is only supported in the
+		 * NPS 1K/2K variant.
+		 */
+		if (nps_hash && (rule->ddr_flags & DF_DRAM_F_HASH_40_42) != 0) {
+			hash ^= bitx64(src, 40 + adj[i], 40 + adj[i]);
+		}
+
+		if ((rule->ddr_flags & DF_DRAM_F_HASH_30_32) != 0) {
+			hash ^= bitx64(src, 30 + adj[i], 30 + adj[i]);
+		}
+
+		if ((rule->ddr_flags & DF_DRAM_F_HASH_21_23) != 0) {
+			hash ^= bitx64(src, 21 + adj[i], 21 + adj[i]);
+		}
+
+		if ((rule->ddr_flags & DF_DRAM_F_HASH_16_18) != 0) {
+			hash ^= bitx64(src, 16 + adj[i], 16 + adj[i]);
+		}
+
+		addr = bitset64(addr, addr_bits[i], addr_bits[i], hash);
+	}
+
+	*addrp = addr;
+	return (B_TRUE);
+}
+
+/*
+ * Denormalization for everyone's favourite interleave type! See the big theory
+ * statement in zen_umc.c but the crux of it is we have two cases to consider
+ * depending on whether the two upper hash bits were set (hash[2:1] == 0b11).
+ * The inverse of zen_umc_decode_normalize_zen3_6ch().
+ */
+static boolean_t
+zen_umc_denorm_zen3_6ch(const zen_umc_t *umc, zen_umc_decoder_t *dec,
+    zen_umc_denorm_t *zd)
+{
+	uint64_t addr = zd->zd_adj;
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+	const uint_t start = rule->ddr_addr_start;
+	const uint_t end = start + ZEN_UMC_COD_NBITS - 1;
+	const uint_t sp_start = 14 - ZEN_UMC_COD_NBITS +
+	    dec->dec_umc_chan->chan_np2_space0;
+	const uint32_t chan_hi = dec->dec_ilv_chan >> 1;
+
+	if (rule->ddr_sock_ileave_bits != 0 || rule->ddr_die_ileave_bits != 0) {
+		dec->dec_fail = ZEN_UMC_DECODE_F_COD_BAD_ILEAVE;
+		dec->dec_fail_data = dec->dec_df_ruleno;
+		return (B_FALSE);
+	}
+
+	zd->zd_hashes[0] = dec->dec_ilv_chan & 1;
+	zd->zd_hash_used[0] = zd->zd_hash_used[1] = zd->zd_hash_used[2] =
+	    B_TRUE;
+
+	/*
+	 * The special case where an address got normalized to the top of the
+	 * DIMM's range (its two upper most bits are set).
+	 */
+	if (bitx64(addr, sp_start + 1, sp_start) == 0x3) {
+		boolean_t found = B_FALSE;
+
+		zd->zd_6ch_special = B_TRUE;
+		zd->zd_hashes[1] = zd->zd_hashes[2] = 1;
+
+		/*
+		 * We recover the original top two bits by simply trying every
+		 * possible option. This works as the address above the
+		 * removed bits mod 3 must equal chan[2:1].
+		 */
+		for (uint64_t i = 0; i < 3; i++) {
+			uint64_t v = bitset64(addr, sp_start + 1, sp_start, i);
+			if ((v >> start) % 3 == chan_hi) {
+				addr = v;
+				found = B_TRUE;
+				break;
+			}
+		}
+
+		if (!found) {
+			dec->dec_fail = ZEN_UMC_DECODE_F_NORM_ROUNDTRIP;
+			dec->dec_fail_data = zd->zd_adj;
+			return (B_FALSE);
+		}
+	} else {
+		zd->zd_6ch_special = B_FALSE;
+		zd->zd_hashes[1] = chan_hi & 1;
+		zd->zd_hashes[2] = (chan_hi >> 1) & 1;
+	}
+
+	zd->zd_cands[0] = bitins64(addr, end, start, 0);
+	zd->zd_ncands = 1;
+	return (B_TRUE);
+}
+
+/*
+ * This solves for the bits removed for Zen 3 6-channel style hashes (the
+ * inverse of zen_umc_decode_hash_zen3_6ch()).
+ */
+static boolean_t
+zen_umc_denorm_zen3_6ch_fill(const zen_umc_t *umc, zen_umc_decoder_t *dec,
+    const zen_umc_denorm_t *zd, uint64_t src, uint64_t *addrp)
+{
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+	const uint_t start = rule->ddr_addr_start;
+	const uint32_t bits_2M[3] = { 23, 21, 22 };
+	const uint32_t bits_1G[3] = { 32, 30, 31 };
+	uint64_t addr = *addrp;
+
+	for (uint_t i = 0; i < ZEN_UMC_COD_NBITS; i++) {
+		uint8_t hash = zd->zd_hashes[i];
+
+		if ((rule->ddr_flags & DF_DRAM_F_HASH_30_32) != 0) {
+			hash ^= bitx64(src, bits_1G[i], bits_1G[i]);
+		}
+
+		if ((rule->ddr_flags & DF_DRAM_F_HASH_21_23) != 0) {
+			hash ^= bitx64(src, bits_2M[i], bits_2M[i]);
+		}
+
+		if (i == 0) {
+			hash ^= bitx64(src, start + 3, start + 3);
+		}
+
+		addr = bitset64(addr, start + i, start + i, hash);
+	}
+
+	*addrp = addr;
+	return (B_TRUE);
+}
+
+/*
+ * The inverse of zen_umc_decode_normalize_nps_mod(). Like the forward decode,
+ * the normalized address is divided into 3 pieces we reconstruct here. The
+ * hashed bits solved by zen_umc_denorm_nps_mod_fill().
+ */
+static boolean_t
+zen_umc_denorm_nps_mod(const zen_umc_t *umc, zen_umc_decoder_t *dec,
+    zen_umc_denorm_t *zd)
+{
+	uint_t chan_mod, nbits, nmid_bits, hi_hash;
+	uint64_t low, mid, high, upper, addr;
+	uint8_t hash0;
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+	const uint_t start = rule->ddr_addr_start;
+
+	if (!zen_umc_decode_nps_mod_params(dec, &chan_mod, &nbits)) {
+		return (B_FALSE);
+	}
+
+	nmid_bits = 6 - nbits;
+	low = bitx64(zd->zd_adj, start - 1, 0);
+	mid = bitx64(zd->zd_adj, start + nmid_bits - 1, start);
+	high = bitx64(zd->zd_adj, 63, start + nmid_bits);
+
+	if (rule->ddr_sock_ileave_bits == 0) {
+		hash0 = high & 1;
+		high >>= 1;
+	} else {
+		hash0 = dec->dec_ilv_sock & 1;
+	}
+
+	/*
+	 * We can re-construct the upper bits from the channel bits and hashes.
+	 */
+	hi_hash = dec->dec_ilv_chan / chan_mod;
+	upper = high * chan_mod +
+	    ((dec->dec_ilv_chan % chan_mod) + chan_mod - hash0) % chan_mod;
+
+	zd->zd_hashes[0] = hash0;
+	zd->zd_hash_used[0] = B_TRUE;
+	switch (nbits) {
+	case 1:
+		break;
+	case 2:
+		zd->zd_hashes[2] = hi_hash & 1;
+		zd->zd_hash_used[2] = B_TRUE;
+		break;
+	case 3:
+		zd->zd_hashes[1] = hi_hash & 1;
+		zd->zd_hashes[2] = (hi_hash >> 1) & 1;
+		zd->zd_hash_used[1] = zd->zd_hash_used[2] = B_TRUE;
+		break;
+	}
+
+	/*
+	 * The middle bits sit directly above the starting bit, the upper
+	 * address at bit 14. Anything in between is a removed hash bit that
+	 * will be filled in later.
+	 */
+	addr = low | (mid << (start + 1)) | (upper << 14);
+	zd->zd_cands[0] = addr;
+	zd->zd_ncands = 1;
+	return (B_TRUE);
+}
+
+/*
+ * This solves for the hashed bits of a Zen 4 non-power of 2 hash (the
+ * inverse of zen_umc_decode_hash_nps_mod()).
+ */
+static boolean_t
+zen_umc_denorm_nps_mod_fill(const zen_umc_t *umc, zen_umc_decoder_t *dec,
+    const zen_umc_denorm_t *zd, uint64_t src, uint64_t *addrp)
+{
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+	const uint32_t addr_bits[3] = { rule->ddr_addr_start, 12, 13 };
+	uint64_t addr = *addrp;
+
+	for (uint_t i = 0; i < ZEN_UMC_NPS_MOD_NBITS; i++) {
+		uint8_t hash;
+
+		if (!zd->zd_hash_used[i])
+			continue;
+
+		hash = zd->zd_hashes[i];
+
+		if ((rule->ddr_flags & DF_DRAM_F_HASH_30_32) != 0) {
+			hash ^= bitx64(src, 30 + i, 30 + i);
+		}
+
+		if ((rule->ddr_flags & DF_DRAM_F_HASH_21_23) != 0) {
+			hash ^= bitx64(src, 21 + i, 21 + i);
+		}
+
+		if ((rule->ddr_flags & DF_DRAM_F_HASH_16_18) != 0) {
+			hash ^= bitx64(src, 16 + i, 16 + i);
+		}
+
+		/*
+		 * Unlike normal NPS hashes, bit 14 is not conditioned on
+		 * socket interleaving.
+		 */
+		if (i == 0) {
+			hash ^= bitx64(src, 14, 14);
+		}
+
+		addr = bitset64(addr, addr_bits[i], addr_bits[i], hash);
+	}
+
+	*addrp = addr;
+	return (B_TRUE);
+}
+
+/*
+ * The inverse of zen_umc_decode_normalize_nps_k_mod(). Like the forward decode,
+ * the normalized address is divided into 3 pieces we reconstruct here. Unlike
+ * the other cases which only produce a single candidate physical address,
+ * things are more complicated: the channel modulus is computed over the raw
+ * physical address while the division is computed over the rule relative
+ * address. To resolve that we instead return candidates for every possible
+ * remainder and choose the candidate that successfully forward decodes to our
+ * normalized address.
+ */
+static boolean_t
+zen_umc_denorm_nps_k_mod(const zen_umc_t *umc, zen_umc_decoder_t *dec,
+    zen_umc_denorm_t *zd)
+{
+	uint64_t low, mid, high;
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+	const zen_umc_np2_k_rule_t *np2;
+	const uint_t start = rule->ddr_addr_start;
+
+	if ((np2 = zen_umc_decode_np2_k_rule(dec)) == NULL) {
+		return (B_FALSE);
+	}
+
+	if (rule->ddr_die_ileave_bits != 0 || rule->ddr_addr_start != 8) {
+		dec->dec_fail = ZEN_UMC_DECODE_F_NPS_BAD_ILEAVE;
+		dec->dec_fail_data = dec->dec_df_ruleno;
+		return (B_FALSE);
+	}
+
+	if (np2->zukr_sock != (rule->ddr_sock_ileave_bits == 1)) {
+		dec->dec_fail = ZEN_UMC_DECODE_F_NPS_BAD_ILEAVE;
+		dec->dec_fail_data = dec->dec_df_ruleno;
+		return (B_FALSE);
+	}
+
+	if (np2->zukr_sock) {
+		zd->zd_hashes[ZEN_UMC_NP2_K_HASH_8] = dec->dec_ilv_sock & 1;
+		zd->zd_hash_used[ZEN_UMC_NP2_K_HASH_8] = B_TRUE;
+	}
+
+	for (uint32_t i = 0; i < np2->zukr_chan_mod_shift; i++) {
+		zen_umc_np2_k_hash_t h = np2->zukr_chan_fill[i];
+
+		VERIFY3U(h, <, ARRAY_SIZE(zen_umc_np2_k_hash_bits));
+		zd->zd_hashes[h] = bitx32(dec->dec_ilv_chan, i, i);
+		zd->zd_hash_used[h] = B_TRUE;
+	}
+
+	low = bitx64(zd->zd_adj, start - 1, 0);
+	mid = bitx64(zd->zd_adj, start + np2->zukr_norm_naddr - 1, start);
+	high = bitx64(zd->zd_adj, 63, start + np2->zukr_norm_naddr);
+
+	ASSERT3U(np2->zukr_mod, <=, ZEN_UMC_NPS_MOD_MAX);
+	zd->zd_ncands = 0;
+	for (uint64_t r = 0; r < np2->zukr_mod; r++) {
+		uint64_t div = high * np2->zukr_mod + r;
+		uint64_t addr = low | (mid << np2->zukr_norm_addr);
+
+		if (np2->zukr_div_naddr > 0) {
+			uint_t ins_end = np2->zukr_div_addr +
+			    np2->zukr_div_naddr - 1;
+			addr = bitset64(addr, ins_end, np2->zukr_div_addr,
+			    bitx64(div, np2->zukr_div_naddr - 1, 0));
+			div >>= np2->zukr_div_naddr;
+		}
+
+		addr |= div << np2->zukr_high;
+		zd->zd_cands[zd->zd_ncands++] = addr;
+	}
+
+	return (B_TRUE);
+}
+
+/*
+ * This solves for the hashed bits of a NPS 1K/2K non-power of 2 hash (the
+ * inverse of zen_umc_decode_hash_nps_k_mod()).
+ */
+static boolean_t
+zen_umc_denorm_nps_k_mod_fill(const zen_umc_t *umc, zen_umc_decoder_t *dec,
+    const zen_umc_denorm_t *zd, uint64_t src, uint64_t *addrp)
+{
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+	uint64_t addr = *addrp;
+
+	for (uint_t i = 0; i < ARRAY_SIZE(zen_umc_np2_k_hash_bits); i++) {
+		uint8_t hash;
+		const uint32_t bit = zen_umc_np2_k_hash_bits[i];
+
+		if (!zd->zd_hash_used[i])
+			continue;
+
+		hash = zd->zd_hashes[i];
+
+		if ((rule->ddr_flags & DF_DRAM_F_HASH_40_42) != 0) {
+			hash ^= bitx64(src, 40 + i, 40 + i);
+		}
+
+		if ((rule->ddr_flags & DF_DRAM_F_HASH_30_32) != 0) {
+			hash ^= bitx64(src, 30 + i, 30 + i);
+		}
+
+		if ((rule->ddr_flags & DF_DRAM_F_HASH_21_23) != 0) {
+			hash ^= bitx64(src, 21 + i, 21 + i);
+		}
+
+		if ((rule->ddr_flags & DF_DRAM_F_HASH_16_18) != 0) {
+			hash ^= bitx64(src, 16 + i, 16 + i);
+		}
+
+		if (i == 0) {
+			hash ^= bitx64(src, 14, 14);
+		}
+
+		addr = bitset64(addr, bit, bit, hash);
+	}
+
+	*addrp = addr;
+	return (B_TRUE);
+}
+
+/*
+ * This constructs the list of possible physical addresses based on the
+ * interleave type of the DF rule.
+ */
+static boolean_t
+zen_umc_denorm_skeleton(const zen_umc_t *umc, zen_umc_decoder_t *dec,
+    zen_umc_denorm_t *zd)
+{
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+
+	switch (rule->ddr_chan_ileave) {
+	case DF_CHAN_ILEAVE_1CH:
+	case DF_CHAN_ILEAVE_2CH:
+	case DF_CHAN_ILEAVE_4CH:
+	case DF_CHAN_ILEAVE_8CH:
+	case DF_CHAN_ILEAVE_16CH:
+	case DF_CHAN_ILEAVE_32CH:
+		return (zen_umc_denorm_nohash(umc, dec, zd));
+	case DF_CHAN_ILEAVE_COD4_2CH:
+	case DF_CHAN_ILEAVE_COD2_4CH:
+	case DF_CHAN_ILEAVE_COD1_8CH:
+	case DF_CHAN_ILEAVE_NPS4_2CH:
+	case DF_CHAN_ILEAVE_NPS2_4CH:
+	case DF_CHAN_ILEAVE_NPS1_8CH:
+	case DF_CHAN_ILEAVE_NPS4_2CH_1K:
+	case DF_CHAN_ILEAVE_NPS2_4CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_8CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_16CH_1K:
+	case DF_CHAN_ILEAVE_NPS4_2CH_2K:
+	case DF_CHAN_ILEAVE_NPS2_4CH_2K:
+	case DF_CHAN_ILEAVE_NPS1_8CH_2K:
+	case DF_CHAN_ILEAVE_NPS1_16CH_2K:
+		return (zen_umc_denorm_hash(umc, dec, zd));
+	case DF_CHAN_ILEAVE_6CH:
+		return (zen_umc_denorm_zen3_6ch(umc, dec, zd));
+	case DF_CHAN_ILEAVE_NPS4_3CH:
+	case DF_CHAN_ILEAVE_NPS2_6CH:
+	case DF_CHAN_ILEAVE_NPS1_12CH:
+	case DF_CHAN_ILEAVE_NPS2_5CH:
+	case DF_CHAN_ILEAVE_NPS1_10CH:
+		return (zen_umc_denorm_nps_mod(umc, dec, zd));
+	case DF_CHAN_ILEAVE_NPS4_3CH_1K:
+	case DF_CHAN_ILEAVE_NPS2_6CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_12CH_1K:
+	case DF_CHAN_ILEAVE_NPS0_24CH_1K:
+	case DF_CHAN_ILEAVE_NPS2_5CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_10CH_1K:
+	case DF_CHAN_ILEAVE_NPS4_3CH_2K:
+	case DF_CHAN_ILEAVE_NPS2_6CH_2K:
+	case DF_CHAN_ILEAVE_NPS1_12CH_2K:
+	case DF_CHAN_ILEAVE_NPS0_24CH_2K:
+	case DF_CHAN_ILEAVE_NPS2_5CH_2K:
+	case DF_CHAN_ILEAVE_NPS1_10CH_2K:
+		return (zen_umc_denorm_nps_k_mod(umc, dec, zd));
+	case DF_CHAN_ILEAVE_MI3H_8CH:
+	case DF_CHAN_ILEAVE_MI3H_16CH:
+	case DF_CHAN_ILEAVE_MI3H_32CH:
+	default:
+		dec->dec_fail = ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP;
+		dec->dec_fail_data = rule->ddr_chan_ileave;
+		return (B_FALSE);
+	}
+}
+
+/*
+ * Fill in the hashed bits of a candidate given the address that hardware would
+ * have computed the hash over.
+ */
+static boolean_t
+zen_umc_denorm_fill(const zen_umc_t *umc, zen_umc_decoder_t *dec,
+    const zen_umc_denorm_t *zd, uint64_t src, uint64_t *addrp)
+{
+	const df_dram_rule_t *rule = dec->dec_df_rule;
+
+	switch (rule->ddr_chan_ileave) {
+	case DF_CHAN_ILEAVE_1CH:
+	case DF_CHAN_ILEAVE_2CH:
+	case DF_CHAN_ILEAVE_4CH:
+	case DF_CHAN_ILEAVE_8CH:
+	case DF_CHAN_ILEAVE_16CH:
+	case DF_CHAN_ILEAVE_32CH:
+		return (B_TRUE);
+	case DF_CHAN_ILEAVE_COD4_2CH:
+	case DF_CHAN_ILEAVE_COD2_4CH:
+	case DF_CHAN_ILEAVE_COD1_8CH:
+	case DF_CHAN_ILEAVE_NPS4_2CH:
+	case DF_CHAN_ILEAVE_NPS2_4CH:
+	case DF_CHAN_ILEAVE_NPS1_8CH:
+	case DF_CHAN_ILEAVE_NPS4_2CH_1K:
+	case DF_CHAN_ILEAVE_NPS2_4CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_8CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_16CH_1K:
+	case DF_CHAN_ILEAVE_NPS4_2CH_2K:
+	case DF_CHAN_ILEAVE_NPS2_4CH_2K:
+	case DF_CHAN_ILEAVE_NPS1_8CH_2K:
+	case DF_CHAN_ILEAVE_NPS1_16CH_2K:
+		return (zen_umc_denorm_hash_fill(umc, dec, zd, src, addrp));
+	case DF_CHAN_ILEAVE_6CH:
+		return (zen_umc_denorm_zen3_6ch_fill(umc, dec, zd, src, addrp));
+	case DF_CHAN_ILEAVE_NPS4_3CH:
+	case DF_CHAN_ILEAVE_NPS2_6CH:
+	case DF_CHAN_ILEAVE_NPS1_12CH:
+	case DF_CHAN_ILEAVE_NPS2_5CH:
+	case DF_CHAN_ILEAVE_NPS1_10CH:
+		return (zen_umc_denorm_nps_mod_fill(umc, dec, zd, src, addrp));
+	case DF_CHAN_ILEAVE_NPS4_3CH_1K:
+	case DF_CHAN_ILEAVE_NPS2_6CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_12CH_1K:
+	case DF_CHAN_ILEAVE_NPS0_24CH_1K:
+	case DF_CHAN_ILEAVE_NPS2_5CH_1K:
+	case DF_CHAN_ILEAVE_NPS1_10CH_1K:
+	case DF_CHAN_ILEAVE_NPS4_3CH_2K:
+	case DF_CHAN_ILEAVE_NPS2_6CH_2K:
+	case DF_CHAN_ILEAVE_NPS1_12CH_2K:
+	case DF_CHAN_ILEAVE_NPS0_24CH_2K:
+	case DF_CHAN_ILEAVE_NPS2_5CH_2K:
+	case DF_CHAN_ILEAVE_NPS1_10CH_2K:
+		return (zen_umc_denorm_nps_k_mod_fill(umc, dec, zd, src,
+		    addrp));
+	default:
+		dec->dec_fail = ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP;
+		dec->dec_fail_data = rule->ddr_chan_ileave;
+		return (B_FALSE);
+	}
+}
+
+/*
+ * Normalized (Channel) Address to System (Physical) Address
+ *
+ * This implements the inverse of zen_umc_decode_pa(): given a UMC channel and
+ * a channel-normalized address, re-construct the system (physical) address that
+ * would've been directed there. See the big theory statement in zen_umc.c for
+ * the overall approach. But in short:
+ *
+ *   1. Find the UMC's DRAM rule that contains the normalized address and remove
+ *      the channel offset.
+ *   2. Match that rule back to the CCM's DRAM rule so that we use the same
+ *      interleave information as the forward path.
+ *   3. Work backwards from the channel's fabric ID (undoing any remapping) and
+ *      the rule's destination fabric ID, to the socket, die, and channel
+ *      interleave values.
+ *   4. Re-insert the address bits that normalization removed. Bits that were
+ *      used directly are known from (3). Bits that were hashed are solved from
+ *      the hash equations. Bits that were folded into a modulus are collected
+ *      into a small number of possible candidates.
+ *   5. Add back the rule's base and the DRAM hole.
+ *   6. Run each candidate through the forward decoder and accept the one that
+ *      lands on the same channel and normalized address.
+ *
+ * On success, the decoder is left in the same state as if zen_umc_decode_pa()
+ * had been called on the resulting system address, so all of the DIMM level
+ * information is available as well.
+ *
+ * If we manage to construct a system address that does round trip to the
+ * channel and normalized address, but the forward decode subsequently fails
+ * (e.g. no chip-select matches the address), we return B_FALSE with that
+ * failure, but dec_pa will still be valid.
+ */
+boolean_t
+zen_umc_decode_norm_addr(const zen_umc_t *umc, const zen_umc_chan_t *chan,
+    const uint64_t norm, zen_umc_decoder_t *dec)
+{
+	zen_umc_denorm_t zd;
+	boolean_t raw;
+
+	zen_umc_decoder_init(dec);
+	dec->dec_umc_chan = chan;
+	dec->dec_norm_addr = norm;
+	bzero(&zd, sizeof (zd));
+
+	if (!zen_umc_denorm_find_umc_rule(umc, dec, &zd)) {
+		ASSERT3U(dec->dec_fail, !=, ZEN_UMC_DECODE_F_NONE);
+		return (B_FALSE);
+	}
+
+	if (!zen_umc_denorm_find_df_rule(umc, dec)) {
+		ASSERT3U(dec->dec_fail, !=, ZEN_UMC_DECODE_F_NONE);
+		return (B_FALSE);
+	}
+
+	if (!zen_umc_denorm_ileave_ids(umc, dec)) {
+		ASSERT3U(dec->dec_fail, !=, ZEN_UMC_DECODE_F_NONE);
+		return (B_FALSE);
+	}
+
+	if (!zen_umc_denorm_skeleton(umc, dec, &zd)) {
+		ASSERT3U(dec->dec_fail, !=, ZEN_UMC_DECODE_F_NONE);
+		return (B_FALSE);
+	}
+
+	/*
+	 * For each candidate, first apply the base and hole so that we know
+	 * what the raw system address looks like. Then solve for the hashed
+	 * bits using whichever of the two addresses hardware hashes over. The
+	 * hashed bits are all below bit 24 and the base and hole are always
+	 * aligned to at least 16 MiB, so filling them in after the fact does
+	 * not disturb the base and hole adjustment.
+	 */
+	raw = zen_umc_ileave_uses_raw_addr(umc, dec->dec_df_rule);
+	for (uint_t i = 0; i < zd.zd_ncands; i++) {
+		zen_umc_decoder_t fwd;
+		uint64_t pa, src;
+
+		pa = zen_umc_unadjust_dram_addr(umc, dec, zd.zd_cands[i]);
+		src = raw ? pa : zd.zd_cands[i];
+		if (!zen_umc_denorm_fill(umc, dec, &zd, src, &pa)) {
+			ASSERT3U(dec->dec_fail, !=, ZEN_UMC_DECODE_F_NONE);
+			return (B_FALSE);
+		}
+
+		dec->dec_pa = pa;
+
+		(void) zen_umc_decode_pa(umc, dec->dec_pa, &fwd);
+		if (fwd.dec_umc_chan != chan || fwd.dec_norm_addr != norm) {
+			continue;
+		}
+
+		switch (fwd.dec_fail) {
+		case ZEN_UMC_DECODE_F_NONE:
+			*dec = fwd;
+			return (B_TRUE);
+		case ZEN_UMC_DECODE_F_NO_CS_BASE_MATCH:
+			/*
+			 * We got back to the same place, but the channel
+			 * address doesn't correspond to a chip-select. Hand
+			 * back the forward decoder's state so the caller has
+			 * the system address and the failure.
+			 */
+			*dec = fwd;
+			return (B_FALSE);
+		default:
+			continue;
+		}
+	}
+
+	dec->dec_fail = ZEN_UMC_DECODE_F_NORM_ROUNDTRIP;
+	dec->dec_fail_data = dec->dec_pa;
+	return (B_FALSE);
 }

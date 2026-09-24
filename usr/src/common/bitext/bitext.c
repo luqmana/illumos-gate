@@ -10,14 +10,14 @@
  */
 
 /*
- * Copyright 2022 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
  * Various functions for manipulating regions of bits in standard sized
  * integers. Meant to be a replacement for the extant BITX macro and provide
- * additional functionality. See bitx64(9F), bitdel64(9F), and bitset64(9f) for
- * more information.
+ * additional functionality. See bitx64(9F), bitdel64(9F), bitins64(9F), and
+ * bitset64(9F) for more information.
  */
 
 #include <sys/debug.h>
@@ -168,4 +168,29 @@ bitdel64(uint64_t val, uint_t high, uint_t low)
 	}
 
 	return ((high_val << low) | low_val);
+}
+
+uint64_t
+bitins64(uint64_t val, uint_t high, uint_t low, uint64_t ins)
+{
+	uint64_t high_val = 0;
+	uint64_t low_val = 0;
+	uint_t nbits;
+
+	ASSERT3U(high, >=, low);
+	ASSERT3U(high, <, 64);
+	ASSERT3U(low, <, 64);
+
+	nbits = high - low + 1;
+	if (low != 0) {
+		low_val = bitx64(val, low - 1, 0);
+	}
+
+	if (high != 63) {
+		high_val = bitx64(val, 63 - nbits, low);
+	}
+
+	val = (high_val << (high + 1)) | low_val;
+
+	return (bitset64(val, high, low, ins));
 }

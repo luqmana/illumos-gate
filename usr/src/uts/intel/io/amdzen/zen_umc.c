@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -4077,11 +4077,48 @@ zen_umc_open(dev_t *devp, int flag, int otyp, cred_t *credp)
 	return (0);
 }
 
+/*
+ * Fill in the ioctl structure from a successful decode, whichever direction it
+ * was performed in.
+ */
 static void
-zen_umc_ioctl_decode(zen_umc_t *umc, mc_encode_ioc_t *encode)
+zen_umc_ioctl_fill_decode(zen_umc_t *umc, const zen_umc_decoder_t *dec,
+    mc_encode_ioc_t *encode)
+{
+	uint32_t sock, die, comp;
+
+	encode->mcei_errdata = 0;
+	encode->mcei_err = 0;
+	encode->mcei_pa = dec->dec_pa;
+	encode->mcei_chan_addr = dec->dec_norm_addr;
+	encode->mcei_rank_addr = UINT64_MAX;
+	encode->mcei_board = 0;
+	zen_fabric_id_decompose(&umc->umc_decomp, dec->dec_targ_fabid, &sock,
+	    &die, &comp);
+	encode->mcei_chip = sock;
+	encode->mcei_die = die;
+	encode->mcei_mc = dec->dec_umc_chan->chan_logid;
+	encode->mcei_chan = 0;
+	encode->mcei_dimm = dec->dec_dimm_no;
+	encode->mcei_row = dec->dec_dimm_row;
+	encode->mcei_column = dec->dec_dimm_col;
+	/*
+	 * We don't have a logical rank that something matches to, we have the
+	 * actual chip-select and rank multiplication. If we could figure out
+	 * how to transform that into an actual rank, that'd be grand.
+	 */
+	encode->mcei_rank = UINT8_MAX;
+	encode->mcei_cs = dec->dec_dimm_csno;
+	encode->mcei_rm = dec->dec_dimm_rm;
+	encode->mcei_bank = dec->dec_dimm_bank;
+	encode->mcei_bank_group = dec->dec_dimm_bank_group;
+	encode->mcei_subchan = dec->dec_dimm_subchan;
+}
+
+static void
+zen_umc_ioctl_decode_phys_addr(zen_umc_t *umc, mc_encode_ioc_t *encode)
 {
 	zen_umc_decoder_t dec;
-	uint32_t sock, die, comp;
 
 	bzero(&dec, sizeof (dec));
 	if (!zen_umc_decode_pa(umc, encode->mcei_pa, &dec)) {
@@ -4090,31 +4127,40 @@ zen_umc_ioctl_decode(zen_umc_t *umc, mc_encode_ioc_t *encode)
 		return;
 	}
 
-	encode->mcei_errdata = 0;
-	encode->mcei_err = 0;
-	encode->mcei_chan_addr = dec.dec_norm_addr;
-	encode->mcei_rank_addr = UINT64_MAX;
-	encode->mcei_board = 0;
-	zen_fabric_id_decompose(&umc->umc_decomp, dec.dec_targ_fabid, &sock,
-	    &die, &comp);
-	encode->mcei_chip = sock;
-	encode->mcei_die = die;
-	encode->mcei_mc = dec.dec_umc_chan->chan_logid;
-	encode->mcei_chan = 0;
-	encode->mcei_dimm = dec.dec_dimm_no;
-	encode->mcei_row = dec.dec_dimm_row;
-	encode->mcei_column = dec.dec_dimm_col;
-	/*
-	 * We don't have a logical rank that something matches to, we have the
-	 * actual chip-select and rank multiplication. If we could figure out
-	 * how to transform that into an actual rank, that'd be grand.
-	 */
-	encode->mcei_rank = UINT8_MAX;
-	encode->mcei_cs = dec.dec_dimm_csno;
-	encode->mcei_rm = dec.dec_dimm_rm;
-	encode->mcei_bank = dec.dec_dimm_bank;
-	encode->mcei_bank_group = dec.dec_dimm_bank_group;
-	encode->mcei_subchan = dec.dec_dimm_subchan;
+	zen_umc_ioctl_fill_decode(umc, &dec, encode);
+}
+
+static void
+zen_umc_ioctl_decode_chan_addr(zen_umc_t *umc, mc_encode_ioc_t *encode)
+{
+	zen_umc_decoder_t dec;
+	const zen_umc_chan_t *chan;
+
+	encode->mcei_pa = UINT64_MAX;
+	if (encode->mcei_board != 0 || encode->mcei_chan != 0) {
+		encode->mcei_err = (uint32_t)ZEN_UMC_DECODE_F_CANNOT_MAP_FABID;
+		encode->mcei_errdata = 0;
+		return;
+	}
+
+	chan = zen_umc_find_chan_by_id(umc, encode->mcei_chip, encode->mcei_die,
+	    encode->mcei_mc);
+	if (chan == NULL) {
+		encode->mcei_err = (uint32_t)ZEN_UMC_DECODE_F_CANNOT_MAP_FABID;
+		encode->mcei_errdata = encode->mcei_mc;
+		return;
+	}
+
+	bzero(&dec, sizeof (dec));
+	if (!zen_umc_decode_norm_addr(umc, chan, encode->mcei_chan_addr,
+	    &dec)) {
+		encode->mcei_err = (uint32_t)dec.dec_fail;
+		encode->mcei_errdata = dec.dec_fail_data;
+		encode->mcei_pa = dec.dec_pa;
+		return;
+	}
+
+	zen_umc_ioctl_fill_decode(umc, &dec, encode);
 }
 
 static void
@@ -4432,7 +4478,7 @@ zen_umc_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 	}
 
 	switch (cmd) {
-	case MC_IOC_DECODE_PA:
+	case MC_IOC_DECODE_ADDR:
 		if (crgetzoneid(credp) != GLOBAL_ZONEID ||
 		    drv_priv(credp) != 0) {
 			ret = EPERM;
@@ -4445,8 +4491,21 @@ zen_umc_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 			break;
 		}
 
-		zen_umc_ioctl_decode(umc, &encode);
 		ret = 0;
+		switch (encode.mcei_type) {
+		case MET_PHYS_ADDR:
+			zen_umc_ioctl_decode_phys_addr(umc, &encode);
+			break;
+		case MET_CHAN_ADDR:
+			zen_umc_ioctl_decode_chan_addr(umc, &encode);
+			break;
+		default:
+			ret = ENOTSUP;
+			break;
+		}
+
+		if (ret != 0)
+			break;
 
 		if (ddi_copyout(&encode, (void *)arg, sizeof (encode),
 		    mode & FKIOCTL) != 0) {

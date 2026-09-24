@@ -11,7 +11,7 @@
 
 /*
  * Copyright 2019 Joyent, Inc.
- * Copyright 2022 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -2777,7 +2777,7 @@ imc_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 
 		ret = 0;
 		break;
-	case MC_IOC_DECODE_PA:
+	case MC_IOC_DECODE_ADDR:
 		if (crgetzoneid(credp) != GLOBAL_ZONEID ||
 		    drv_priv(credp) != 0) {
 			ret = EPERM;
@@ -2790,8 +2790,19 @@ imc_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 			break;
 		}
 
-		imc_ioctl_decode(imc, &encode);
 		ret = 0;
+		switch (encode.mcei_type) {
+		case MET_PHYS_ADDR:
+			imc_ioctl_decode(imc, &encode);
+			break;
+		case MET_CHAN_ADDR:
+		default:
+			ret = ENOTSUP;
+			break;
+		}
+
+		if (ret != 0)
+			break;
 
 		if (ddi_copyout(&encode, (void *)arg, sizeof (encode),
 		    mode & FKIOCTL) != 0) {

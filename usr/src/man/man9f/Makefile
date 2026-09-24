@@ -57,6 +57,7 @@ MANFILES=	ASSERT.9f				\
 		biosize.9f				\
 		biowait.9f				\
 		bitdel64.9f				\
+		bitins64.9f				\
 		bitset64.9f				\
 		bitx64.9f				\
 		bp_copyin.9f				\

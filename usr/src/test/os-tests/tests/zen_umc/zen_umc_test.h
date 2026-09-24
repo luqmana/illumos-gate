@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2024 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef _ZEN_UMC_TEST_H
@@ -83,7 +83,34 @@ typedef struct umc_decode_test {
 	uint8_t				udt_dimm_cs;
 } umc_decode_test_t;
 
+/*
+ * Test cases for going from a channel and normalized address back to a system
+ * address. The channel is identified by socket, die, and logical channel. If
+ * the channel cannot be found, then that is treated as a failure with
+ * ZEN_UMC_DECODE_F_CANNOT_MAP_FABID.
+ */
+typedef struct umc_norm_test {
+	const char			*unt_desc;
+	const zen_umc_t			*unt_umc;
+	uint32_t			unt_sock;
+	uint32_t			unt_die;
+	uint32_t			unt_chan;
+	uint64_t			unt_norm;
+	boolean_t			unt_pass;
+	/*
+	 * When unt_pass is B_FALSE, this is the expected failure.
+	 */
+	zen_umc_decode_failure_t	unt_fail;
+	/*
+	 * The expected system address. This is checked on success and also on
+	 * failure if it is not UINT64_MAX, as some failures still produce a
+	 * system address.
+	 */
+	uint64_t			unt_pa;
+} umc_norm_test_t;
+
 extern const umc_fabric_test_t zen_umc_test_fabric_ids[];
+extern const umc_norm_test_t zen_umc_test_norm[];
 
 extern const umc_decode_test_t zen_umc_test_basics[];
 extern const umc_decode_test_t zen_umc_test_chans[];

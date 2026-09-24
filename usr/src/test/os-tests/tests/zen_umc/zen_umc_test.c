@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2024 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -27,78 +27,38 @@
 
 #include "zen_umc_test.h"
 
-static const char *
-zen_umc_test_strerror(zen_umc_decode_failure_t fail)
-{
-	switch (fail) {
-	case ZEN_UMC_DECODE_F_NONE:
-		return ("Actually succeeded");
-	case ZEN_UMC_DECODE_F_OUTSIDE_DRAM:
-		return ("Address outside of DRAM");
-	case ZEN_UMC_DECODE_F_NO_DF_RULE:
-		return ("Address didn't find a DF rule that matched");
-	case ZEN_UMC_DECODE_F_ILEAVE_UNDERFLOW:
-		return ("Interleave adjustments caused PA to underflow");
-	case ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP:
-		return ("Unsupported channel interleave");
-	case ZEN_UMC_DECODE_F_COD_BAD_ILEAVE:
-		return ("Unsupported interleave settings for COD hash");
-	case ZEN_UMC_DECODE_F_NPS_BAD_ILEAVE:
-		return ("Unsupported interleave settings for NPS hash");
-	case ZEN_UMC_DECODE_F_BAD_REMAP_SET:
-		return ("Remap ruleset was invalid");
-	case ZEN_UMC_DECODE_F_BAD_REMAP_ENTRY:
-		return ("Remap entry was invalid");
-	case ZEN_UMC_DECODE_F_REMAP_HAS_BAD_COMP:
-		return ("Remap entry is not a valid component ID");
-	case ZEN_UMC_DECODE_F_CANNOT_MAP_FABID:
-		return ("Failed to find target fabric ID");
-	case ZEN_UMC_DECODE_F_UMC_DOESNT_HAVE_PA:
-		return ("Target UMC does not have a DRAM rule for PA");
-	case ZEN_UMC_DECODE_F_CALC_NORM_UNDERFLOW:
-		return ("Address normalization underflowed");
-	case ZEN_UMC_DECODE_F_NO_CS_BASE_MATCH:
-		return ("No chip-select matched normal address");
-	default:
-		return ("<unknown>");
-	}
-}
 
-static const char *
-zen_umc_test_strenum(zen_umc_decode_failure_t fail)
+/*
+ * Every successful forward decode should be reversible: given the channel and
+ * normalized address that we ended up with, we should be able to get back to
+ * the original physical address.
+ */
+static boolean_t
+zen_umc_test_roundtrip(const umc_decode_test_t *test,
+    const zen_umc_decoder_t *dec)
 {
-	switch (fail) {
-	case ZEN_UMC_DECODE_F_NONE:
-		return ("ZEN_UMC_DECODE_F_NONE");
-	case ZEN_UMC_DECODE_F_OUTSIDE_DRAM:
-		return ("ZEN_UMC_DECODE_F_OUTSIDE_DRAM");
-	case ZEN_UMC_DECODE_F_NO_DF_RULE:
-		return ("ZEN_UMC_DECODE_F_NO_DF_RULE");
-	case ZEN_UMC_DECODE_F_ILEAVE_UNDERFLOW:
-		return ("ZEN_UMC_DECODE_F_ILEAVE_UNDERFLOW");
-	case ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP:
-		return ("ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP");
-	case ZEN_UMC_DECODE_F_COD_BAD_ILEAVE:
-		return ("ZEN_UMC_DECODE_F_COD_BAD_ILEAVE");
-	case ZEN_UMC_DECODE_F_NPS_BAD_ILEAVE:
-		return ("ZEN_UMC_DECODE_F_NPS_BAD_ILEAVE");
-	case ZEN_UMC_DECODE_F_BAD_REMAP_SET:
-		return ("ZEN_UMC_DECODE_F_BAD_REMAP_SET");
-	case ZEN_UMC_DECODE_F_BAD_REMAP_ENTRY:
-		return ("ZEN_UMC_DECODE_F_BAD_REMAP_ENTRY");
-	case ZEN_UMC_DECODE_F_REMAP_HAS_BAD_COMP:
-		return ("ZEN_UMC_DECODE_F_REMAP_HAS_BAD_COMP");
-	case ZEN_UMC_DECODE_F_CANNOT_MAP_FABID:
-		return ("ZEN_UMC_DECODE_F_CANNOT_MAP_FABID");
-	case ZEN_UMC_DECODE_F_UMC_DOESNT_HAVE_PA:
-		return ("ZEN_UMC_DECODE_F_UMC_DOESNT_HAVE_PA");
-	case ZEN_UMC_DECODE_F_CALC_NORM_UNDERFLOW:
-		return ("ZEN_UMC_DECODE_F_CALC_NORM_UNDERFLOW");
-	case ZEN_UMC_DECODE_F_NO_CS_BASE_MATCH:
-		return ("ZEN_UMC_DECODE_F_NO_CS_BASE_MATCH");
-	default:
-		return ("<unknown>");
+	zen_umc_decoder_t rev;
+
+	memset(&rev, '\0', sizeof (rev));
+	if (!zen_umc_decode_norm_addr(test->udt_umc, dec->dec_umc_chan,
+	    dec->dec_norm_addr, &rev)) {
+		(void) printf("\tround trip of normal address 0x%" PRIx64
+		    " failed with error '%s' (%s/0x%x), data 0x%" PRIx64 "\n",
+		    dec->dec_norm_addr, zen_umc_decode_strerror(rev.dec_fail),
+		    zen_umc_decode_strenum(rev.dec_fail), rev.dec_fail,
+		    rev.dec_fail_data);
+		return (B_FALSE);
 	}
+
+	if (rev.dec_pa != test->udt_pa) {
+		(void) printf("\tround trip physical address mismatch\n"
+		    "\t\texpected 0x%" PRIx64 "\n\t\tfound    0x%" PRIx64 "\n",
+		    test->udt_pa, rev.dec_pa);
+		return (B_FALSE);
+	}
+
+	(void) printf("\tTEST PASSED: Round-trip normal address\n");
+	return (B_TRUE);
 }
 
 static boolean_t
@@ -253,8 +213,8 @@ zen_umc_test_decode_one(const umc_decode_test_t *test)
 
 		(void) printf("\tdecode unexpectedly succeeded\n");
 		(void) printf("\texpected error '%s' (%s/0x%x)\n",
-		    zen_umc_test_strerror(test->udt_fail),
-		    zen_umc_test_strenum(test->udt_fail),
+		    zen_umc_decode_strerror(test->udt_fail),
+		    zen_umc_decode_strenum(test->udt_fail),
 		    test->udt_fail);
 		(void) printf("\t\tdecoded socket: 0x%x\n", sock);
 		(void) printf("\t\tdecoded die: 0x%x\n", die);
@@ -377,7 +337,10 @@ zen_umc_test_decode_one(const umc_decode_test_t *test)
 		if (success) {
 			(void) printf("\tTEST PASSED: Successfully decoded "
 			    "PA\n");
-		} else {
+			success = zen_umc_test_roundtrip(test, &dec);
+		}
+
+		if (!success) {
 			(void) printf("\tTEST FAILED!\n");
 		}
 		return (success);
@@ -386,11 +349,11 @@ zen_umc_test_decode_one(const umc_decode_test_t *test)
 			(void) printf("\terror mismatch\n"
 			    "\t\texpected '%s' (%s/0x%x)\n"
 			    "\t\tfound '%s' (%s/0x%x)\n",
-			    zen_umc_test_strerror(test->udt_fail),
-			    zen_umc_test_strenum(test->udt_fail),
+			    zen_umc_decode_strerror(test->udt_fail),
+			    zen_umc_decode_strenum(test->udt_fail),
 			    test->udt_fail,
-			    zen_umc_test_strerror(dec.dec_fail),
-			    zen_umc_test_strenum(dec.dec_fail),
+			    zen_umc_decode_strerror(dec.dec_fail),
+			    zen_umc_decode_strenum(dec.dec_fail),
 			    dec.dec_fail);
 			return (B_FALSE);
 		}
@@ -399,8 +362,8 @@ zen_umc_test_decode_one(const umc_decode_test_t *test)
 		return (B_TRUE);
 	} else {
 		(void) printf("\tdecode failed with error '%s' (%s/0x%x)\n",
-		    zen_umc_test_strerror(dec.dec_fail),
-		    zen_umc_test_strenum(dec.dec_fail),
+		    zen_umc_decode_strerror(dec.dec_fail),
+		    zen_umc_decode_strenum(dec.dec_fail),
 		    dec.dec_fail);
 
 		if (test->udt_norm_addr != UINT64_MAX) {
@@ -489,6 +452,94 @@ zen_umc_test_decode(const umc_decode_test_t *tests, uint_t *ntests,
 	}
 }
 
+static boolean_t
+zen_umc_test_norm_one(const umc_norm_test_t *test)
+{
+	boolean_t pass;
+	zen_umc_decoder_t dec;
+	const zen_umc_chan_t *chan;
+
+	(void) printf("Running test: %s\n", test->unt_desc);
+	(void) printf("\tDecoding normal address: 0x%" PRIx64 " on %u/%u/%u\n",
+	    test->unt_norm, test->unt_sock, test->unt_die, test->unt_chan);
+
+	chan = zen_umc_find_chan_by_id(test->unt_umc, test->unt_sock,
+	    test->unt_die, test->unt_chan);
+	if (chan == NULL) {
+		if (test->unt_pass ||
+		    test->unt_fail != ZEN_UMC_DECODE_F_CANNOT_MAP_FABID) {
+			(void) printf("\tfailed to find channel\n");
+			return (B_FALSE);
+		}
+
+		(void) printf("\tTEST PASSED: Correctly failed to find "
+		    "channel\n");
+		return (B_TRUE);
+	} else if (!test->unt_pass &&
+	    test->unt_fail == ZEN_UMC_DECODE_F_CANNOT_MAP_FABID) {
+		(void) printf("\tunexpectedly found channel\n");
+		return (B_FALSE);
+	}
+
+	memset(&dec, '\0', sizeof (dec));
+	pass = zen_umc_decode_norm_addr(test->unt_umc, chan, test->unt_norm,
+	    &dec);
+	if (pass && !test->unt_pass) {
+		(void) printf("\tdecode unexpectedly succeeded\n");
+		(void) printf("\texpected error '%s' (%s/0x%x)\n",
+		    zen_umc_decode_strerror(test->unt_fail),
+		    zen_umc_decode_strenum(test->unt_fail),
+		    test->unt_fail);
+		(void) printf("\t\tdecoded physical address: 0x%" PRIx64 "\n",
+		    dec.dec_pa);
+		return (B_FALSE);
+	} else if (!pass && test->unt_pass) {
+		(void) printf("\tdecode failed with error '%s' (%s/0x%x), "
+		    "data 0x%" PRIx64 "\n",
+		    zen_umc_decode_strerror(dec.dec_fail),
+		    zen_umc_decode_strenum(dec.dec_fail), dec.dec_fail,
+		    dec.dec_fail_data);
+		return (B_FALSE);
+	} else if (!pass && dec.dec_fail != test->unt_fail) {
+		(void) printf("\terror mismatch\n"
+		    "\t\texpected '%s' (%s/0x%x)\n"
+		    "\t\tfound '%s' (%s/0x%x)\n",
+		    zen_umc_decode_strerror(test->unt_fail),
+		    zen_umc_decode_strenum(test->unt_fail),
+		    test->unt_fail,
+		    zen_umc_decode_strerror(dec.dec_fail),
+		    zen_umc_decode_strenum(dec.dec_fail),
+		    dec.dec_fail);
+		return (B_FALSE);
+	}
+
+	if (test->unt_pa != UINT64_MAX && test->unt_pa != dec.dec_pa) {
+		(void) printf("\tphysical address mismatch\n"
+		    "\t\texpected 0x%" PRIx64 "\n\t\tfound    0x%" PRIx64 "\n",
+		    test->unt_pa, dec.dec_pa);
+		return (B_FALSE);
+	}
+
+	if (pass) {
+		(void) printf("\tTEST PASSED: Successfully decoded normal "
+		    "address\n");
+	} else {
+		(void) printf("\tTEST PASSED: Correct error generated\n");
+	}
+	return (B_TRUE);
+}
+
+static void
+zen_umc_test_norm_run(const umc_norm_test_t *tests, uint_t *ntests,
+    uint_t *nfail)
+{
+	for (uint_t i = 0; tests[i].unt_desc != NULL; i++) {
+		if (!zen_umc_test_norm_one(&tests[i]))
+			*nfail += 1;
+		*ntests += 1;
+	}
+}
+
 typedef struct zen_umc_test_set {
 	const char *set_name;
 	const umc_decode_test_t *set_test;
@@ -516,6 +567,12 @@ zen_umc_test_selected(int argc, char *argv[], uint_t *ntests, uint_t *nfail)
 
 		if (strcmp(argv[i], "fabric_ids") == 0) {
 			zen_umc_test_fabric(zen_umc_test_fabric_ids, ntests,
+			    nfail);
+			continue;
+		}
+
+		if (strcmp(argv[i], "norm") == 0) {
+			zen_umc_test_norm_run(zen_umc_test_norm, ntests,
 			    nfail);
 			continue;
 		}
@@ -549,6 +606,7 @@ main(int argc, char *argv[])
 			zen_umc_test_decode(zen_umc_test_set[i].set_test,
 			    &ntests, &nfail);
 		}
+		zen_umc_test_norm_run(zen_umc_test_norm, &ntests, &nfail);
 	}
 	(void) printf("%u/%u tests passed\n", ntests - nfail, ntests);
 	return (nfail > 0);

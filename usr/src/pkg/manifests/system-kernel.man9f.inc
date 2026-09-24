@@ -190,6 +190,7 @@ file path=usr/share/man/man9f/bioreset.9f
 file path=usr/share/man/man9f/biosize.9f
 file path=usr/share/man/man9f/biowait.9f
 file path=usr/share/man/man9f/bitdel64.9f
+file path=usr/share/man/man9f/bitins64.9f
 link path=usr/share/man/man9f/bitset16.9f target=bitset64.9f
 link path=usr/share/man/man9f/bitset32.9f target=bitset64.9f
 file path=usr/share/man/man9f/bitset64.9f

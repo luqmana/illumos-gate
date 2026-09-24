@@ -23,7 +23,7 @@
  */
 /*
  * Copyright 2019 Joyent, Inc.
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef _SYS_MC_H
@@ -65,7 +65,7 @@ typedef struct mc_unum {
 #define	MC_IOC_SNAPSHOT_INFO	(MC_IOC | 1)
 #define	MC_IOC_SNAPSHOT		(MC_IOC | 2)
 #define	MC_IOC_ONLINESPARE_EN	(MC_IOC | 4)
-#define	MC_IOC_DECODE_PA	(MC_IOC | 5)
+#define	MC_IOC_DECODE_ADDR	(MC_IOC | 5)
 #define	MC_IOC_DECODE_SNAPSHOT_INFO	(MC_IOC | 6)
 #define	MC_IOC_DECODE_SNAPSHOT	(MC_IOC | 7)
 #define	MC_IOC_GET_DATA		(MC_IOC | 8)
@@ -86,6 +86,23 @@ typedef struct mc_snapshot_info {
 	uint32_t mcs_size;	/* snapshot size */
 	uint_t mcs_gen;		/* snapshot generation number */
 } mc_snapshot_info_t;
+
+typedef enum mc_encode_type {
+	/*
+	 * Decode the physical address in mcei_pa. All other fields are
+	 * outputs.
+	 */
+	MET_PHYS_ADDR	= 0,
+	/*
+	 * Decode the channel normalized address in mcei_chan_addr. The
+	 * channel is identified by mcei_chip, mcei_die, mcei_mc, and mcei_chan,
+	 * which are inputs and use the same values that decoding a physical
+	 * address outputs. mcei_pa and the DIMM-related fields are outputs.
+	 * If the driver can determine the physical address but fails later
+	 * in decoding, mcei_pa will be set even though mcei_err is non-zero.
+	 */
+	MET_CHAN_ADDR
+} mc_encode_type_t;
 
 /*
  * Data used to simulate encoding or decoding of a physical / DIMM address.
@@ -144,7 +161,12 @@ typedef struct mc_encode_ioc {
 	uint8_t		mcei_bank;
 	uint8_t		mcei_bank_group;
 	uint8_t		mcei_subchan;
-	uint8_t		mcei_pad[6];
+	/*
+	 * This is an mc_encode_type_t and indicates what kind of address is
+	 * being decoded.
+	 */
+	uint8_t		mcei_type;
+	uint8_t		mcei_pad[5];
 } mc_encode_ioc_t;
 
 typedef enum mc_data_type {

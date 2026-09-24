@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 #ifndef _ZEN_UMC_H
@@ -831,7 +831,137 @@ typedef enum zen_umc_decode_failure {
 	 * or secondary.
 	 */
 	ZEN_UMC_DECODE_F_NO_CS_BASE_MATCH,
+	/*
+	 * Indicates that we could not find a valid DRAM rule in the UMC whose
+	 * offset region contains the normalized address.
+	 */
+	ZEN_UMC_DECODE_F_NORM_NO_UMC_RULE,
+	/*
+	 * Indicates that the UMC's DRAM rule did not correspond to any DRAM
+	 * rule in the CCM (DF-wide) rule set.
+	 */
+	ZEN_UMC_DECODE_F_NORM_NO_DF_RULE,
+	/*
+	 * Given a candidate DF rule for a normalized address which has
+	 * remapping enabled, this indicates we couldn't find a remap entry
+	 * corresponding to the channel.
+	 */
+	ZEN_UMC_DECODE_F_NORM_NO_REMAP_ENTRY,
+	/*
+	 * Indicates that the channel is not a valid target of a candidate DF
+	 * rule: its fabric ID is below the rule's destination.
+	 */
+	ZEN_UMC_DECODE_F_NORM_FABID_RULE_MISMATCH,
+	/*
+	 * Indicates that the channel is not a valid target of a candidate DF
+	 * rule: the resulting interleave IDs exceed what the rule can address
+	 */
+	ZEN_UMC_DECODE_F_NORM_ILEAVE_RULE_MISMATCH,
+	/*
+	 * Indicates that the system address we constructed from the normalized
+	 * address did not decode back to the same channel and normalized
+	 * address.
+	 */
+	ZEN_UMC_DECODE_F_NORM_ROUNDTRIP,
 } zen_umc_decode_failure_t;
+
+static inline const char *
+zen_umc_decode_strerror(zen_umc_decode_failure_t fail)
+{
+	switch (fail) {
+	case ZEN_UMC_DECODE_F_NONE:
+		return ("Actually succeeded");
+	case ZEN_UMC_DECODE_F_OUTSIDE_DRAM:
+		return ("Address outside of DRAM");
+	case ZEN_UMC_DECODE_F_NO_DF_RULE:
+		return ("Address didn't find a DF rule that matched");
+	case ZEN_UMC_DECODE_F_ILEAVE_UNDERFLOW:
+		return ("Interleave adjustments caused PA to underflow");
+	case ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP:
+		return ("Unsupported channel interleave");
+	case ZEN_UMC_DECODE_F_COD_BAD_ILEAVE:
+		return ("Unsupported interleave settings for COD hash");
+	case ZEN_UMC_DECODE_F_NPS_BAD_ILEAVE:
+		return ("Unsupported interleave settings for NPS hash");
+	case ZEN_UMC_DECODE_F_BAD_REMAP_SET:
+		return ("Remap ruleset was invalid");
+	case ZEN_UMC_DECODE_F_BAD_REMAP_ENTRY:
+		return ("Remap entry was invalid");
+	case ZEN_UMC_DECODE_F_REMAP_HAS_BAD_COMP:
+		return ("Remap entry is not a valid component ID");
+	case ZEN_UMC_DECODE_F_CANNOT_MAP_FABID:
+		return ("Failed to find target fabric ID");
+	case ZEN_UMC_DECODE_F_UMC_DOESNT_HAVE_PA:
+		return ("Target UMC does not have a DRAM rule for PA");
+	case ZEN_UMC_DECODE_F_CALC_NORM_UNDERFLOW:
+		return ("Address normalization underflowed");
+	case ZEN_UMC_DECODE_F_NO_CS_BASE_MATCH:
+		return ("No chip-select matched normal address");
+	case ZEN_UMC_DECODE_F_NORM_NO_UMC_RULE:
+		return ("No UMC DRAM rule contains normal address");
+	case ZEN_UMC_DECODE_F_NORM_NO_DF_RULE:
+		return ("UMC DRAM rule has no matching DF rule");
+	case ZEN_UMC_DECODE_F_NORM_NO_REMAP_ENTRY:
+		return ("No matching remap entry found");
+	case ZEN_UMC_DECODE_F_NORM_FABID_RULE_MISMATCH:
+		return ("Channel is not a target of the DF rule");
+	case ZEN_UMC_DECODE_F_NORM_ILEAVE_RULE_MISMATCH:
+		return ("Derived interleave settings not valid for DF rule");
+	case ZEN_UMC_DECODE_F_NORM_ROUNDTRIP:
+		return ("System address did not decode back to normal address");
+	default:
+		return ("<unknown>");
+	}
+}
+
+static inline const char *
+zen_umc_decode_strenum(zen_umc_decode_failure_t fail)
+{
+	switch (fail) {
+	case ZEN_UMC_DECODE_F_NONE:
+		return ("ZEN_UMC_DECODE_F_NONE");
+	case ZEN_UMC_DECODE_F_OUTSIDE_DRAM:
+		return ("ZEN_UMC_DECODE_F_OUTSIDE_DRAM");
+	case ZEN_UMC_DECODE_F_NO_DF_RULE:
+		return ("ZEN_UMC_DECODE_F_NO_DF_RULE");
+	case ZEN_UMC_DECODE_F_ILEAVE_UNDERFLOW:
+		return ("ZEN_UMC_DECODE_F_ILEAVE_UNDERFLOW");
+	case ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP:
+		return ("ZEN_UMC_DECODE_F_CHAN_ILEAVE_NOTSUP");
+	case ZEN_UMC_DECODE_F_COD_BAD_ILEAVE:
+		return ("ZEN_UMC_DECODE_F_COD_BAD_ILEAVE");
+	case ZEN_UMC_DECODE_F_NPS_BAD_ILEAVE:
+		return ("ZEN_UMC_DECODE_F_NPS_BAD_ILEAVE");
+	case ZEN_UMC_DECODE_F_BAD_REMAP_SET:
+		return ("ZEN_UMC_DECODE_F_BAD_REMAP_SET");
+	case ZEN_UMC_DECODE_F_BAD_REMAP_ENTRY:
+		return ("ZEN_UMC_DECODE_F_BAD_REMAP_ENTRY");
+	case ZEN_UMC_DECODE_F_REMAP_HAS_BAD_COMP:
+		return ("ZEN_UMC_DECODE_F_REMAP_HAS_BAD_COMP");
+	case ZEN_UMC_DECODE_F_CANNOT_MAP_FABID:
+		return ("ZEN_UMC_DECODE_F_CANNOT_MAP_FABID");
+	case ZEN_UMC_DECODE_F_UMC_DOESNT_HAVE_PA:
+		return ("ZEN_UMC_DECODE_F_UMC_DOESNT_HAVE_PA");
+	case ZEN_UMC_DECODE_F_CALC_NORM_UNDERFLOW:
+		return ("ZEN_UMC_DECODE_F_CALC_NORM_UNDERFLOW");
+	case ZEN_UMC_DECODE_F_NO_CS_BASE_MATCH:
+		return ("ZEN_UMC_DECODE_F_NO_CS_BASE_MATCH");
+	case ZEN_UMC_DECODE_F_NORM_NO_UMC_RULE:
+		return ("ZEN_UMC_DECODE_F_NORM_NO_UMC_RULE");
+	case ZEN_UMC_DECODE_F_NORM_NO_DF_RULE:
+		return ("ZEN_UMC_DECODE_F_NORM_NO_DF_RULE");
+	case ZEN_UMC_DECODE_F_NORM_NO_REMAP_ENTRY:
+		return ("ZEN_UMC_DECODE_F_NORM_NO_REMAP_ENTRY");
+	case ZEN_UMC_DECODE_F_NORM_FABID_RULE_MISMATCH:
+		return ("ZEN_UMC_DECODE_F_NORM_FABID_RULE_MISMATCH");
+	case ZEN_UMC_DECODE_F_NORM_ILEAVE_RULE_MISMATCH:
+		return ("ZEN_UMC_DECODE_F_NORM_ILEAVE_RULE_MISMATCH");
+	case ZEN_UMC_DECODE_F_NORM_ROUNDTRIP:
+		return ("ZEN_UMC_DECODE_F_NORM_ROUNDTRIP");
+	default:
+		return ("<unknown>");
+	}
+}
 
 /*
  * This struct accumulates all of our decoding logic and states and we use it so
@@ -880,6 +1010,10 @@ typedef struct zen_umc_decoder {
  */
 extern boolean_t zen_umc_decode_pa(const zen_umc_t *, const uint64_t,
     zen_umc_decoder_t *);
+extern boolean_t zen_umc_decode_norm_addr(const zen_umc_t *,
+    const zen_umc_chan_t *, const uint64_t, zen_umc_decoder_t *);
+extern const zen_umc_chan_t *zen_umc_find_chan_by_id(const zen_umc_t *,
+    uint32_t, uint32_t, uint32_t);
 
 /*
  * Encoding and decoding

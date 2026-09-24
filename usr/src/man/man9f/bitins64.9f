@@ -11,19 +11,20 @@
 .\"
 .\" Copyright 2026 Oxide Computer Company
 .\"
-.Dd April 12, 2022
-.Dt BITDEL64 9F
+.Dd September 18, 2026
+.Dt BITINS64 9F
 .Os
 .Sh NAME
-.Nm bitdel64
-.Nd delete bits from an integer
+.Nm bitins64
+.Nd insert bits into an integer
 .Sh SYNOPSIS
 .In sys/bitext.h
 .Ft uint64_t
-.Fo bitdel64
+.Fo bitins64
 .Fa "uint64_t value"
 .Fa "uint_t high"
 .Fa "uint_t low"
+.Fa "uint64_t insert"
 .Fc
 .Sh INTERFACE LEVEL
 .Sy Volatile -
@@ -32,32 +33,46 @@ API and ABI stability is not guaranteed.
 .Sh PARAMETERS
 .Bl -tag -width Fa
 .It Fa value
+An integer to insert bits into.
 .It Fa high
-The high end, inclusive, of the bit range to delete from
+The high end, inclusive, of the bit range to insert into
 .Fa value .
 .It Fa low
-The low end, inclusive, of the bit range to delete from
+The low end, inclusive, of the bit range to insert into
 .Fa value .
-.It Fa value
-An integer to remove bits from.
+.It Fa insert
+The value to place in the newly inserted bit range.
+Only as many low bits of
+.Fa insert
+as fit in the range are used.
 .El
 .Sh DESCRIPTION
 The
-.Fn bitdel64
-function removes bits from an integer,
+.Fn bitins64
+function inserts a range of bits into an integer,
 .Fa value .
-The act of removing a bit range not only removes all the bits in the
-range specified by
+It is the inverse of
+.Xr bitdel64 9F .
+All bits of
+.Fa value
+at or above
+.Fa low
+are shifted up by the width of the range specified by
 .Fa low
 and
 .Fa high ,
-but also causes all remaining bits to be shifted over to start at
-.Fa low .
+and the range itself is filled with the low bits of
+.Fa insert .
+Any bits shifted beyond bit 63 are discarded.
 .Pp
-For example, consider the binary value 0b11_1101_0011
-.Pq 0x3d3 .
-If we deleted bits 4 through 7, the resulting value would be 0b11_0011
+For example, consider the binary value 0b11_0011
 .Pq 0x33 .
+If we inserted bits 4 through 7 with an
+.Fa insert
+value of 0b1010
+.Pq 0xa ,
+the resulting value would be 0b11_1010_0011
+.Pq 0x3a3 .
 .Pp
 .Fa high
 and
@@ -74,9 +89,9 @@ cannot be greater than
 or 63.
 .Sh RETURN VALUES
 Upon successful completion, the
-.Fn bitdel64
-returns the modified integer with the appropriate bits removed.
+.Fn bitins64
+returns the modified integer with the appropriate bits inserted.
 .Sh SEE ALSO
-.Xr bitins64 9F ,
+.Xr bitdel64 9F ,
 .Xr bitset64 9F ,
 .Xr bitx64 9F
