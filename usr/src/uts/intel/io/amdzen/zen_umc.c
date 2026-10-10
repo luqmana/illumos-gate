@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -501,17 +501,21 @@
  *   o 1 GiB (starting at bit 30)
  *
  * In this world, you take the starting address bit defined by the rule and XOR
- * it with each enabled interleave address. If you have more than one bit to
- * select (e.g. because you are hashing across more than 2 channels), then you
- * continue taking subsequent bits from each enabled region. So the second bit
- * would use 17, 21, and 31 if all three ranges were enabled while the third bit
- * would use 18, 22, and 32. While these are straightforward, there is a catch.
+ * it with a bit from each enabled interleave address range. If you have more
+ * than one bit to select (e.g. because you are hashing across more than 2
+ * channels), then you continue taking bits from each enabled region (e.g. the
+ * second bit would use 17, 22, and 31 if all three ranges were enabled while
+ * the third bit would use 18, 23, and 32). While these are straightforward,
+ * there are a couple of catches.
  *
- * While the DRAM rule contains what the starting address bit, you don't
+ * While the DRAM rule contains what the starting address bit is, you don't
  * actually use subsequent bits in the same way. Instead subsequent bits are
  * deterministic and use bits 12 and 13 from the address.  This is not the same
- * consecutive thing that one might expect. Let's look at a Rome/Milan based
- * example:
+ * consecutive thing that one might expect.  Additionally, the Rome/Milan "COD"
+ * hash does not pair the address bits with the hash ranges in order: the
+ * starting bit uses the last bit of each range (18, 23, and 32) and always
+ * also mixes in bit 14, while bits 12 and 13 use the first and second bits of
+ * each range respectively.  Let's look at a Rome/Milan based example:
  *
  *   o 8-channel "COD" hashing, starting at address 9. All three ranges enabled.
  *     1-die and 1-socket interleaving.
@@ -519,22 +523,23 @@
  *      In this model we are using 3 bits for the channel, 0 bits for the socket
  *      and die.
  *
- *	Channel ID[0] = addr[9]  ^ addr[16] ^ addr[21] ^ addr[30]
- *	Channel ID[1] = addr[12] ^ addr[17] ^ addr[22] ^ addr[31]
- *	Channel ID[2] = addr[13] ^ addr[18] ^ addr[23] ^ addr[32]
+ *	Channel ID[0] = addr[9]  ^ addr[18] ^ addr[23] ^ addr[32] ^ addr[14]
+ *	Channel ID[1] = addr[12] ^ addr[16] ^ addr[21] ^ addr[30]
+ *	Channel ID[2] = addr[13] ^ addr[17] ^ addr[22] ^ addr[31]
  *
  *	So through this scheme we'd have a socket/die of 0, and then the channel
  *	ID is computed based on that. The number of bits that we use here
  *	depends on how many channels the hash is going across.
  *
  * The Genoa and related variants, termed "NPS", has a few wrinkles. First,
- * rather than 3 bits being used for the channel, up to 4 bits are. Second,
- * while the Rome/Milan "COD" hash above does not support socket or die
- * interleaving, the "NPS" hash actually supports socket interleaving. However,
- * unlike the straightforward non-hashing scheme, the first bit is used to
- * determine the socket when enabled as opposed to the last one. In addition, if
- * we're not performing socket interleaving, then we end up throwing address bit
- * 14 into the mix here. Let's look at examples:
+ * rather than 3 bits being used for the channel, up to 4 bits are, and the
+ * hash ranges are paired with the address bits in order (the first bit uses
+ * 16, 21, and 30 and so on). Second, while the Rome/Milan "COD" hash above
+ * does not support socket or die interleaving, the "NPS" hash actually supports
+ * socket interleaving. However, unlike the straightforward non-hashing scheme,
+ * the first bit is used to determine the socket when enabled as opposed to the
+ * last one. In addition, if we're not performing socket interleaving, then we
+ * end up throwing address bit 14 into the mix here. Let's look at examples:
  *
  *   o 4-channel "NPS" hashing, starting at address 8. All three ranges enabled.
  *     1-die and 1-socket interleaving.

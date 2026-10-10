@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright 2025 Oxide Computer Company
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -522,8 +522,11 @@ zen_umc_decode_ileave_cod(const zen_umc_t *umc, zen_umc_decoder_t *dec)
 	/*
 	 * The order of bits here is defined by AMD. Yes, we do use the rule's
 	 * address bit first and then skip to bit 12 for the second hash bit.
+	 * The hash ranges are not paired with the address bits in order but
+	 * are rotated.
 	 */
 	const uint32_t addr_bits[3] = { rule->ddr_addr_start, 12, 13 };
+	const uint32_t adj[3] = { 2, 0, 1 };
 
 	if (rule->ddr_sock_ileave_bits != 0 || rule->ddr_die_ileave_bits != 0) {
 		dec->dec_fail = ZEN_UMC_DECODE_F_COD_BAD_ILEAVE;
@@ -558,18 +561,30 @@ zen_umc_decode_ileave_cod(const zen_umc_t *umc, zen_umc_decoder_t *dec)
 		uint8_t hash = 0;
 
 		hash = bitx64(dec->dec_ilv_pa, addr_bits[i], addr_bits[i]);
+
+		/*
+		 * We always mix in bit 14 to the rule's starting address bit.
+		 */
+		if (i == 0) {
+			uint8_t val = bitx64(dec->dec_ilv_pa, 14, 14);
+			hash ^= val;
+		}
+
 		if ((rule->ddr_flags & DF_DRAM_F_HASH_16_18) != 0) {
-			uint8_t val = bitx64(dec->dec_ilv_pa, 16 + i, 16 + i);
+			uint8_t val = bitx64(dec->dec_ilv_pa, 16 + adj[i],
+			    16 + adj[i]);
 			hash ^= val;
 		}
 
 		if ((rule->ddr_flags & DF_DRAM_F_HASH_21_23) != 0) {
-			uint8_t val = bitx64(dec->dec_ilv_pa, 21 + i, 21 + i);
+			uint8_t val = bitx64(dec->dec_ilv_pa, 21 + adj[i],
+			    21 + adj[i]);
 			hash ^= val;
 		}
 
 		if ((rule->ddr_flags & DF_DRAM_F_HASH_30_32) != 0) {
-			uint8_t val = bitx64(dec->dec_ilv_pa, 30 + i, 30 + i);
+			uint8_t val = bitx64(dec->dec_ilv_pa, 30 + adj[i],
+			    30 + adj[i]);
 			hash ^= val;
 		}
 
