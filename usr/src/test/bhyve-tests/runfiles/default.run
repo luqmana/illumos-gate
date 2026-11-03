@@ -71,6 +71,7 @@ tests = [
 	'inout',
 	'rep_instrs',
 	'triple_fault',
+	'reinject_errcode',
 	'exit_paging',
 	'page_dirty',
 	'exit_consistent',
