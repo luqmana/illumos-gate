@@ -134,7 +134,9 @@
 #define	CPUID_8000_001E	(0x8000001E)
 #define	CPUID_8000_0020	(0x80000020)
 
-#define	CPUID_VM_HIGH	0x40000000
+#define	CPUID_VM_SIGNATURE	0x40000000
+#define	CPUID_BHYVE_FEATURES	0x40000001
+#define	CPUID_VM_HIGH		CPUID_BHYVE_FEATURES
 
 static const struct vcpu_cpuid_entry cpuid_empty_entry = { 0 };
 
@@ -572,7 +574,7 @@ legacy_emulate_cpuid(struct vcpu *vcpu, uint32_t *eax, uint32_t *ebx,
 	if (cpu_exthigh != 0 && func >= 0x80000000) {
 		if (func > cpu_exthigh)
 			func = cpu_exthigh;
-	} else if (func >= 0x40000000) {
+	} else if (func >= CPUID_VM_SIGNATURE) {
 		if (func > CPUID_VM_HIGH)
 			func = CPUID_VM_HIGH;
 	} else if (func > cpu_high) {
@@ -1088,11 +1090,18 @@ legacy_emulate_cpuid(struct vcpu *vcpu, uint32_t *eax, uint32_t *ebx,
 			regs[3] = 0;
 			break;
 
-		case 0x40000000:
+		case CPUID_VM_SIGNATURE:
 			regs[0] = CPUID_VM_HIGH;
 			bcopy(bhyve_id, &regs[1], 4);
 			bcopy(bhyve_id + 4, &regs[2], 4);
 			bcopy(bhyve_id + 8, &regs[3], 4);
+			break;
+
+		case CPUID_BHYVE_FEATURES:
+			regs[0] = 0; /* No features to advertise yet */
+			regs[1] = 0;
+			regs[2] = 0;
+			regs[3] = 0;
 			break;
 
 		default:
