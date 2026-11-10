@@ -128,6 +128,13 @@ lapic_intr_msi(struct vm *vm, uint64_t addr, uint64_t msg)
 	 * set for a given message.  Those edge cases are ignored for now.
 	 */
 	dest = (addr >> 12) & 0xff;
+	if (vm_cpuid_ext_dest_id_enabled(vm)) {
+		/*
+		 * Extended Destination ID support uses bits 5-11 of the address
+		 * http://david.woodhou.se/ExtDestId.pdf
+		 */
+		dest |= ((addr >> 5) & 0x7f) << 8;
+	}
 	phys = (addr & MSI_X86_ADDR_LOG) == 0;
 	delmode = msg & APIC_DELMODE_MASK;
 	vec = msg & 0xff;

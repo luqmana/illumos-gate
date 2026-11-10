@@ -441,6 +441,7 @@ void vcpu_cpuid_cleanup(vcpu_cpuid_config_t *);
 bool vcpu_cpuid_x2apic_enabled(struct vcpu *);
 
 bool vm_cpuid_capability(struct vcpu *, enum vm_cpuid_capability);
+bool vm_cpuid_ext_dest_id_enabled(struct vm *);
 bool validate_guest_xcr0(uint64_t, uint64_t);
 
 void vmm_sol_glue_init(void);
