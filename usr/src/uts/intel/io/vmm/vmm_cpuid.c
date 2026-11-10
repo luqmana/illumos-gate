@@ -138,6 +138,9 @@
 #define	CPUID_BHYVE_FEATURES	0x40000001
 #define	CPUID_VM_HIGH		CPUID_BHYVE_FEATURES
 
+/* Features advertised in CPUID_BHYVE_FEATURES %eax */
+#define	CPUID_BHYVE_FEAT_EXT_DEST_ID	(1UL << 0) /* MSI Extended Dest ID */
+
 static const struct vcpu_cpuid_entry cpuid_empty_entry = { 0 };
 
 /*
@@ -1118,7 +1121,7 @@ legacy_emulate_cpuid(struct vcpu *vcpu, uint32_t *eax, uint32_t *ebx,
 			break;
 
 		case CPUID_BHYVE_FEATURES:
-			regs[0] = 0; /* No features to advertise yet */
+			regs[0] = CPUID_BHYVE_FEAT_EXT_DEST_ID;
 			regs[1] = 0;
 			regs[2] = 0;
 			regs[3] = 0;
